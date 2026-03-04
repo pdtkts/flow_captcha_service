@@ -5,19 +5,21 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>flow_captcha_service 管理后台</title>
   <style>
-    :root{--bg:#f4f7fb;--panel:#fff;--line:#e2e8f0;--text:#0f172a;--muted:#64748b;--primary:#2563eb;--ok:#dcfce7;--warn:#fef3c7;--err:#fee2e2;--shadow:0 10px 30px rgba(15,23,42,.08)}
-    *{box-sizing:border-box}body{margin:0;color:var(--text);background:radial-gradient(circle at 8% 0,#e2ecff 0,rgba(226,236,255,0) 32%),radial-gradient(circle at 92% 8%,#ecfeff 0,rgba(236,254,255,0) 28%),var(--bg);font-family:"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif}
-    .container{width:min(1180px,94vw);margin:0 auto;padding:20px 0 32px}.topbar{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}.title{margin:0;font-size:26px}.subtitle{margin:6px 0 0;color:var(--muted);font-size:13px}
-    .role-badge{padding:8px 14px;border-radius:999px;border:1px solid var(--line);background:#fff;font-size:13px;color:#1e293b;white-space:nowrap}.panel{background:var(--panel);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);padding:16px;margin-top:14px}.panel h2{margin:0;font-size:18px}.panel-desc{margin:8px 0 0;font-size:12px;color:var(--muted);line-height:1.6}
+    :root{--bg:#fff;--panel:#fff;--line:#e4e4e7;--text:#09090b;--muted:#71717a;--primary:#18181b;--ok:#dcfce7;--warn:#fef3c7;--err:#fee2e2;--shadow:none}
+    *{box-sizing:border-box}body{margin:0;color:var(--text);background:var(--bg);font-family:"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif}
+    .container{width:min(1180px,94vw);margin:0 auto;padding:12px 0 32px}.topbar{position:sticky;top:0;z-index:20;display:flex;align-items:center;justify-content:space-between;gap:12px;margin:0 -2vw 14px;padding:10px 2vw;border-bottom:1px solid var(--line);background:rgba(255,255,255,.95);backdrop-filter:blur(6px)}.title{margin:0;font-size:24px}.subtitle{margin:6px 0 0;color:var(--muted);font-size:12px}
+    .role-badge{padding:7px 12px;border-radius:999px;border:1px solid var(--line);background:#fff;font-size:12px;color:#27272a;white-space:nowrap}.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:var(--shadow);padding:16px;margin-top:14px}.panel h2{margin:0;font-size:17px}.panel-desc{margin:8px 0 0;font-size:12px;color:var(--muted);line-height:1.6}
     .grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:12px}.field{display:flex;flex-direction:column;gap:6px}.field label{font-size:13px;font-weight:600;color:#334155}.field .hint{font-size:12px;color:var(--muted)}
     .field input,.field select,.field textarea{width:100%;border:1px solid #cbd5e1;border-radius:10px;padding:10px 11px;font-size:13px;color:#0f172a;background:#fff;outline:none}.field input:focus,.field select:focus,.field textarea:focus{border-color:var(--primary);box-shadow:0 0 0 3px rgba(37,99,235,.12)}.field textarea{min-height:90px;resize:vertical}
     .checkbox-line{display:flex;align-items:center;gap:8px;margin-top:10px;color:#334155;font-size:13px;font-weight:600}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
-    button{border:1px solid transparent;border-radius:10px;padding:8px 14px;font-size:13px;cursor:pointer;color:#fff;background:linear-gradient(135deg,#2563eb,#1d4ed8)}button.secondary{color:#1e293b;border-color:var(--line);background:#fff}button.warn{background:linear-gradient(135deg,#d97706,#b45309)}
+    button{border:1px solid transparent;border-radius:8px;padding:8px 14px;font-size:13px;cursor:pointer;color:#fff;background:var(--primary)}button.secondary{color:#27272a;border-color:var(--line);background:#fff}button.warn{background:#b45309}
     .notice{margin-top:12px;border-radius:10px;border:1px solid;padding:10px;font-size:13px;line-height:1.6;display:none}.notice.ok{display:block;background:var(--ok);border-color:#86efac;color:#166534}.notice.warn{display:block;background:var(--warn);border-color:#fcd34d;color:#92400e}.notice.err{display:block;background:var(--err);border-color:#fecaca;color:#991b1b}
     .cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;margin-top:12px}.card{border:1px solid var(--line);border-radius:12px;padding:12px;background:#fff}.card .k{font-size:12px;color:var(--muted)}.card .v{margin-top:6px;font-size:24px;font-weight:700;color:#0b1324}
     .guide-items,.guide-steps{margin:10px 0 0;padding-left:18px;line-height:1.7;font-size:13px}.guide-tag{display:inline-flex;align-items:center;border-radius:999px;font-size:11px;padding:1px 8px;margin-right:8px;border:1px solid}.guide-tag.critical{color:#991b1b;background:#fee2e2;border-color:#fca5a5}.guide-tag.required{color:#92400e;background:#fef3c7;border-color:#fcd34d}.guide-tag.info{color:#1e3a8a;background:#dbeafe;border-color:#93c5fd}
     .table-wrap{width:100%;overflow-x:auto}table{width:100%;border-collapse:collapse;margin-top:12px;font-size:13px}th,td{border-bottom:1px solid #edf2f7;padding:9px 8px;text-align:left;vertical-align:middle}th{color:#475569;font-weight:700;background:#f8fafc}
-    .hidden{display:none!important}#dashboard{display:none}details.advanced{margin-top:10px;border:1px dashed #cbd5e1;border-radius:10px;padding:8px 10px 10px;background:#fafcff}details.advanced>summary{cursor:pointer;font-size:13px;color:#1e3a8a;font-weight:600}
+    .hidden{display:none!important}#dashboard{display:none}#loginPanel{max-width:560px;margin:16px auto 0}details.advanced{margin-top:10px;border:1px dashed #d4d4d8;border-radius:10px;padding:8px 10px 10px;background:#fafafa}details.advanced>summary{cursor:pointer;font-size:13px;color:#27272a;font-weight:600}
+    .toast{position:fixed;right:16px;bottom:16px;z-index:999;padding:10px 14px;border-radius:10px;color:#fff;font-size:13px;font-weight:600;box-shadow:0 10px 20px rgba(0,0,0,.18);animation:toast-in .22s ease}.toast.ok{background:#15803d}.toast.warn{background:#b45309}.toast.err{background:#dc2626}
+    @keyframes toast-in{from{transform:translateY(10px);opacity:0}to{transform:translateY(0);opacity:1}}
     @media (max-width:1000px){.grid,.cards{grid-template-columns:repeat(2,minmax(0,1fr))}}@media (max-width:640px){.topbar{flex-direction:column;align-items:flex-start}.grid,.cards{grid-template-columns:1fr}.title{font-size:22px}}
   </style>
 </head>
@@ -148,7 +150,7 @@
           <div class="field"><label>当前节点名称</label><input id="clusterNodeName" readonly /></div>
         </div>
         <div class="actions"><button id="rotateClusterKeyBtn" class="warn">轮换 Cluster Key</button><button id="refreshNodesBtn" class="secondary">刷新子节点列表</button></div>
-        <div class="table-wrap"><table><thead><tr><th>ID</th><th>节点名</th><th>健康</th><th>启用</th><th>总线程</th><th>空闲线程</th><th>调度上限</th><th>权重</th><th>最近心跳</th><th>操作</th></tr></thead><tbody id="clusterNodesTable"></tbody></table></div>
+        <div class="table-wrap"><table><thead><tr><th>ID</th><th>节点名</th><th>子节点对外地址</th><th>健康</th><th>启用</th><th>总线程</th><th>空闲线程</th><th>调度上限</th><th>权重</th><th>最近心跳</th><th>操作</th></tr></thead><tbody id="clusterNodesTable"></tbody></table></div>
       </section>
 
       <section id="masterApiKeyPanel" class="panel hidden">
@@ -172,13 +174,25 @@
 
   <script>
     (() => {
+      const TOKEN_STORAGE_KEY = "fcs_admin_token";
       const state = { token: "", role: "unknown" };
       const roleTextMap = { master: "主节点（master）", subnode: "子节点（subnode）", standalone: "单机（standalone）", unknown: "未知" };
       const q = (id) => document.getElementById(id);
       const toInt = (v, d) => Number.isFinite(Number(v)) ? Math.floor(Number(v)) : d;
       const toFloat = (v, d) => Number.isFinite(Number(v)) ? Number(v) : d;
 
-      const showNotice = (m, kind = "ok") => { const e = q("notice"); e.className = `notice ${kind}`; e.textContent = m; };
+      const showToast = (m, kind = "ok") => {
+        const e = document.createElement("div");
+        e.className = `toast ${kind}`;
+        e.textContent = m;
+        document.body.appendChild(e);
+        setTimeout(() => {
+          e.style.opacity = "0";
+          e.style.transition = "opacity .25s";
+          setTimeout(() => { if (e.parentNode) e.parentNode.removeChild(e); }, 250);
+        }, 2200);
+      };
+      const showNotice = (m, kind = "ok") => { const e = q("notice"); e.className = `notice ${kind}`; e.textContent = m; showToast(m, kind); };
       const clearNotice = () => { const e = q("notice"); e.className = "notice"; e.textContent = ""; };
       const setEnvNotice = (env = {}) => {
         const keys = Object.keys(env || {});
@@ -194,6 +208,13 @@
         if (opt.body && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
         const r = await fetch(url, { method: opt.method || "GET", headers, body: opt.body ? JSON.stringify(opt.body) : undefined });
         let p = null; try { p = await r.json(); } catch (_) { p = null; }
+        if (r.status === 401 && state.token) {
+          state.token = ""; state.role = "unknown";
+          localStorage.removeItem(TOKEN_STORAGE_KEY);
+          q("dashboard").style.display = "none";
+          q("loginPanel").classList.remove("hidden");
+          q("roleBadge").textContent = "当前角色：未登录";
+        }
         if (!r.ok) throw new Error((p && p.detail) ? p.detail : `HTTP ${r.status}`);
         return p || {};
       };
@@ -380,8 +401,26 @@
         const b = q("clusterNodesTable"); b.innerHTML = "";
         for (const it of (r.items || [])) {
           const tr = document.createElement("tr");
-          tr.innerHTML = `<td>${it.id}</td><td>${it.node_name || "-"}</td><td>${it.healthy ? "健康" : "异常"}</td><td><input type="checkbox" data-node-id="${it.id}" data-node-key="enabled" ${it.enabled ? "checked" : ""} /></td><td>${it.thread_total ?? it.max_concurrency ?? 1}</td><td>${it.thread_idle ?? "-"}</td><td><input data-node-id="${it.id}" data-node-key="max_concurrency" value="${it.max_concurrency ?? 1}" /></td><td><input data-node-id="${it.id}" data-node-key="weight" value="${it.weight ?? 100}" /></td><td>${it.last_heartbeat_at || "-"}</td><td><button class="secondary" data-action="save-node" data-id="${it.id}">保存</button></td>`;
+          tr.innerHTML = `<td>${it.id}</td><td>${it.node_name || "-"}</td><td>${it.base_url || "-"}</td><td>${it.healthy ? "健康" : "异常"}</td><td><input type="checkbox" data-node-id="${it.id}" data-node-key="enabled" ${it.enabled ? "checked" : ""} /></td><td>${it.thread_total ?? it.max_concurrency ?? 1}</td><td>${it.thread_idle ?? "-"}</td><td><input data-node-id="${it.id}" data-node-key="max_concurrency" value="${it.max_concurrency ?? 1}" /></td><td><input data-node-id="${it.id}" data-node-key="weight" value="${it.weight ?? 100}" /></td><td>${it.last_heartbeat_at || "-"}</td><td><button class="secondary" data-action="save-node" data-id="${it.id}">保存</button></td>`;
           b.appendChild(tr);
+        }
+      };
+      const tryRestoreLogin = async () => {
+        const cachedToken = localStorage.getItem(TOKEN_STORAGE_KEY);
+        if (!cachedToken) return;
+        state.token = cachedToken;
+        try {
+          q("loginPanel").classList.add("hidden");
+          q("dashboard").style.display = "block";
+          await loadAll();
+          clearNotice();
+        } catch (_) {
+          state.token = "";
+          state.role = "unknown";
+          localStorage.removeItem(TOKEN_STORAGE_KEY);
+          q("dashboard").style.display = "none";
+          q("loginPanel").classList.remove("hidden");
+          q("roleBadge").textContent = "当前角色：未登录";
         }
       };
       const loadAll = async () => { clearNotice(); await loadProfile(); await loadStats(); await loadSystem(); await loadClusterConfig(); await loadRuntime(); await loadLogs(); await loadApiKeys(); await loadClusterNodes(); };
@@ -390,6 +429,7 @@
         try {
           const r = await req("/api/admin/login", { method: "POST", body: { username: q("loginUsername").value.trim(), password: q("loginPassword").value } });
           state.token = r.token; state.role = r.role || "unknown";
+          localStorage.setItem(TOKEN_STORAGE_KEY, state.token);
           q("loginPanel").classList.add("hidden"); q("dashboard").style.display = "block";
           await loadAll();
           showNotice("登录成功，后台已加载。", "ok");
@@ -399,6 +439,7 @@
       q("logoutBtn").addEventListener("click", async () => {
         try { if (state.token) await req("/api/admin/logout", { method: "POST" }); } catch (_) {}
         state.token = ""; state.role = "unknown";
+        localStorage.removeItem(TOKEN_STORAGE_KEY);
         q("dashboard").style.display = "none"; q("loginPanel").classList.remove("hidden"); q("roleBadge").textContent = "当前角色：未登录"; clearNotice();
       });
       q("refreshAllBtn").addEventListener("click", async () => { try { await loadAll(); showNotice("全部数据已刷新。", "ok"); } catch (err) { showNotice(`刷新失败：${err.message}`, "err"); } });
@@ -499,6 +540,7 @@
           } catch (err) { showNotice(`保存子节点失败：${err.message}`, "err"); }
         }
       });
+      tryRestoreLogin();
     })();
   </script>
 </body>
