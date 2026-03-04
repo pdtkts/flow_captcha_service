@@ -1,9 +1,10 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import json
 from typing import Any, Dict, List, Optional, Tuple
-
-from curl_cffi.requests import AsyncSession
+import urllib.error
+import urllib.request
 
 from ..core.config import config
 from ..core.database import Database
@@ -180,20 +181,67 @@ class ClusterManager:
 
         url = f"{base_url}{path}"
         headers = {"Authorization": f"Bearer {api_key}"}
-        async with AsyncSession() as session:
-            response = await session.post(url, headers=headers, json=json_payload, timeout=timeout)
+        status_code, payload, response_text = await asyncio.to_thread(
+            self._sync_json_http_request,
+            "POST",
+            url,
+            headers,
+            json_payload,
+            timeout,
+        )
+
+        if status_code >= 400:
+            detail = payload.get("detail") if isinstance(payload, dict) else None
+            if not detail:
+                detail = (response_text or "").strip()[:300]
+            raise RuntimeError(f"HTTP {status_code}: {detail or payload}")
+
+        if isinstance(payload, dict):
+            return payload
+        raise RuntimeError("子节点响应不是 JSON 对象")
+
+    @staticmethod
+    def _sync_json_http_request(
+        method: str,
+        url: str,
+        headers: Dict[str, str],
+        payload: Optional[Dict[str, Any]],
+        timeout: int,
+    ) -> tuple[int, Optional[Any], str]:
+        req_headers = dict(headers or {})
+        req_headers.setdefault("Accept", "application/json")
+
+        data = None
+        if payload is not None:
+            data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            req_headers["Content-Type"] = "application/json; charset=utf-8"
+
+        request = urllib.request.Request(
+            url=url,
+            data=data,
+            headers=req_headers,
+            method=(method or "GET").upper(),
+        )
+
+        try:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
+                status_code = int(response.getcode() or 0)
+                raw_body = response.read()
+        except urllib.error.HTTPError as e:
+            status_code = int(getattr(e, "code", 500))
+            raw_body = e.read() if hasattr(e, "read") else b""
+        except Exception as e:
+            raise RuntimeError(f"HTTP 请求失败: {e}") from e
+
+        text = raw_body.decode("utf-8", errors="replace") if raw_body else ""
+        parsed: Optional[Any] = None
+        if text:
             try:
-                payload = response.json()
+                parsed = json.loads(text)
             except Exception:
-                payload = {"detail": response.text[:300]}
+                parsed = None
 
-            if response.status_code >= 400:
-                detail = payload.get("detail") if isinstance(payload, dict) else None
-                raise RuntimeError(f"HTTP {response.status_code}: {detail or payload}")
-
-            if isinstance(payload, dict):
-                return payload
-            raise RuntimeError("子节点响应不是 JSON 对象")
+        return status_code, parsed, text
 
     async def _heartbeat_loop(self):
         debug_logger.log_info("[ClusterManager] subnode heartbeat loop started")
@@ -245,20 +293,30 @@ class ClusterManager:
         }
 
         headers = {"X-Cluster-Key": cluster_key}
+        register_url = f"{master_base}/api/cluster/register"
+        hb_url = f"{master_base}/api/cluster/heartbeat"
 
-        async with AsyncSession() as session:
-            register_url = f"{master_base}/api/cluster/register"
-            hb_url = f"{master_base}/api/cluster/heartbeat"
+        register_status, _, register_text = await asyncio.to_thread(
+            self._sync_json_http_request,
+            "POST",
+            register_url,
+            headers,
+            register_payload,
+            20,
+        )
+        if register_status >= 400:
+            raise RuntimeError(f"register failed: {register_status}, {(register_text or '')[:200]}")
 
-            register_resp = await session.post(register_url, headers=headers, json=register_payload, timeout=20)
-            if register_resp.status_code >= 400:
-                detail = register_resp.text[:200]
-                raise RuntimeError(f"register failed: {register_resp.status_code}, {detail}")
-
-            hb_resp = await session.post(hb_url, headers=headers, json=heartbeat_payload, timeout=20)
-            if hb_resp.status_code >= 400:
-                detail = hb_resp.text[:200]
-                raise RuntimeError(f"heartbeat failed: {hb_resp.status_code}, {detail}")
+        hb_status, _, hb_text = await asyncio.to_thread(
+            self._sync_json_http_request,
+            "POST",
+            hb_url,
+            headers,
+            heartbeat_payload,
+            20,
+        )
+        if hb_status >= 400:
+            raise RuntimeError(f"heartbeat failed: {hb_status}, {(hb_text or '')[:200]}")
 
     async def get_cluster_runtime_summary(self) -> Dict[str, Any]:
         nodes = await self.db.list_cluster_nodes()
