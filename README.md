@@ -152,6 +152,22 @@ docker compose -f docker-compose.cluster.stack.yml up -d --build
 > `FCS_CLUSTER_MASTER_CLUSTER_KEY` 与 `FCS_CLUSTER_NODE_API_KEY`。
 > 请在启动前替换为真实值。
 
+## GHCR Packages
+
+仓库已内置 GitHub Actions 工作流：
+
+- 文件：`.github/workflows/publish-ghcr.yml`
+- 触发：`push main`、`push tag(v*)`、手动触发(`workflow_dispatch`)
+- 目标镜像：`ghcr.io/<owner>/flow_captcha_service`
+
+典型拉取示例：
+
+```bash
+docker pull ghcr.io/genz27/flow_captcha_service:latest
+```
+
+如果仓库/包是私有，请使用有 `read:packages` 权限的 PAT 登录后再拉取。
+
 ## 主节点如何通知子节点关闭
 
 `flow_captcha_service` 没有单独的 `/close` 业务接口，关闭语义通过会话协议实现：
