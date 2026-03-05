@@ -206,6 +206,41 @@
       color:#0f172a;
       background:#fff;
     }
+    .overview-charts{
+      margin-top:12px;
+      display:grid;
+      grid-template-columns:repeat(3,minmax(0,1fr));
+      gap:10px;
+    }
+    .overview-chart{
+      border:1px solid #dbe4ef;
+      border-radius:12px;
+      background:linear-gradient(180deg,#ffffff,#f8fbff);
+      padding:10px;
+    }
+    .overview-chart .k{
+      font-size:12px;
+      color:#64748b;
+      font-weight:700;
+      margin-bottom:8px;
+    }
+    .chart-host{
+      min-height:220px;
+      border:1px solid #e2e8f0;
+      border-radius:10px;
+      background:#fff;
+      padding:6px;
+      overflow:hidden;
+    }
+    .chart-host svg{width:100%;height:206px;display:block}
+    .chart-empty{
+      height:206px;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      color:#94a3b8;
+      font-size:12px;
+    }
     .status-badge{
       display:inline-block;
       border-radius:999px;
@@ -319,6 +354,7 @@
       .grid,.cards{grid-template-columns:repeat(2,minmax(0,1fr))}
       .cluster-kpis{grid-template-columns:repeat(3,minmax(0,1fr))}
       .cluster-toolbar{grid-template-columns:1fr 1fr}
+      .overview-charts{grid-template-columns:1fr 1fr}
     }
     @media (max-width:640px){
       .container{padding-top:12px}
@@ -328,6 +364,7 @@
       .grid,.cards,.login-grid{grid-template-columns:1fr}
       .drawer-grid{grid-template-columns:1fr}
       .cluster-kpis,.cluster-toolbar{grid-template-columns:1fr}
+      .overview-charts{grid-template-columns:1fr}
       #loginPanel{margin-top:16px}
       .login-hero{padding:16px}
       .login-hero h2{font-size:21px}
@@ -425,7 +462,7 @@
             <div class="field"><label>日志级别</label><select id="cfgLogLevel"><option value="DEBUG">DEBUG</option><option value="INFO">INFO</option><option value="WARNING">WARNING</option><option value="ERROR">ERROR</option><option value="CRITICAL">CRITICAL</option></select></div>
             <div class="field"><label>流程超时（秒）</label><input id="cfgFlowTimeout" type="number" min="10" /></div>
             <div class="field"><label>放大超时（秒）</label><input id="cfgUpsampleTimeout" type="number" min="10" /></div>
-            <div class="field"><label>会话保留时长（秒）</label><input id="cfgSessionTtl" type="number" min="60" /></div>
+            <div class="field"><label>会话保留时长（秒）</label><input id="cfgSessionTtl" type="number" min="120" /></div>
           </div>
 
           <div id="masterConfigPanel" class="hidden">
@@ -678,7 +715,7 @@
         q("cfgLogLevel").value = cfg.log?.level || "INFO";
         q("cfgFlowTimeout").value = cfg.captcha?.flow_timeout ?? 300;
         q("cfgUpsampleTimeout").value = cfg.captcha?.upsample_timeout ?? 300;
-        q("cfgSessionTtl").value = cfg.captcha?.session_ttl_seconds ?? 7200;
+        q("cfgSessionTtl").value = cfg.captcha?.session_ttl_seconds ?? 1200;
         q("cfgMasterNodeStale").value = cfg.cluster?.master_node_stale_seconds ?? 120;
         q("cfgMasterDispatchTimeout").value = cfg.cluster?.master_dispatch_timeout_seconds ?? 45;
         q("cfgMasterBaseUrl").value = cfg.cluster?.master_base_url || "";
@@ -718,7 +755,7 @@
             node_name: q("cfgNodeName").value.trim(),
             flow_timeout: toInt(q("cfgFlowTimeout").value, 300),
             upsample_timeout: toInt(q("cfgUpsampleTimeout").value, 300),
-            session_ttl_seconds: toInt(q("cfgSessionTtl").value, 7200),
+            session_ttl_seconds: toInt(q("cfgSessionTtl").value, 1200),
             browser_launch_background: q("cfgLaunchBg").value === "true",
             browser_score_dom_wait_seconds: toFloat(q("cfgDomWait").value, 25),
             browser_recaptcha_settle_seconds: toFloat(q("cfgSettle").value, 3),

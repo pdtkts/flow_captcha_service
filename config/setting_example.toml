@@ -19,7 +19,7 @@ browser_recaptcha_settle_seconds = 3
 browser_score_test_warmup_seconds = 12
 flow_timeout = 300
 upsample_timeout = 300
-session_ttl_seconds = 7200
+session_ttl_seconds = 1200
 node_name = "standalone-node"
 
 [log]

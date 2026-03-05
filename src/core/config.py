@@ -115,7 +115,7 @@ class Config:
                 "browser_score_test_warmup_seconds": 12,
                 "flow_timeout": 300,
                 "upsample_timeout": 300,
-                "session_ttl_seconds": 7200,
+                "session_ttl_seconds": 1200,
                 "node_name": "standalone-node",
             },
             "log": {
@@ -304,8 +304,8 @@ class Config:
     def session_ttl_seconds(self) -> int:
         value = os.getenv("FCS_SESSION_TTL_SECONDS")
         if value:
-            return int(value)
-        return int(self._get("captcha", "session_ttl_seconds", 7200))
+            return max(120, int(value))
+        return max(120, int(self._get("captcha", "session_ttl_seconds", 1200)))
 
     @property
     def node_name(self) -> str:

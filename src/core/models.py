@@ -40,7 +40,7 @@ class SolveResponse(BaseModel):
     token: str
     fingerprint: Optional[Dict[str, Any]] = None
     node_name: str
-    expires_in_seconds: int = 7200
+    expires_in_seconds: int = 1200
 
 
 class FinishRequest(BaseModel):

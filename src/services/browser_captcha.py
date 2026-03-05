@@ -778,15 +778,7 @@ class TokenBrowser:
         action: str
     ):
         """打码成功后延迟关闭浏览器，等待 Flow 请求结束通知。"""
-        flow_timeout = int(getattr(config, "flow_timeout", 300) or 300)
-        upsample_timeout = int(getattr(config, "upsample_timeout", 300) or 300)
-        if action == "IMAGE_GENERATION":
-            # 图片链路可能包含放大请求，等待上限至少覆盖 flow/upsample 超时
-            base_timeout = max(flow_timeout, upsample_timeout)
-            wait_timeout = max(base_timeout + 180, 900)
-        else:
-            # 视频请求默认超时更长，给更大的缓冲避免“请求未结束就关闭”
-            wait_timeout = max(flow_timeout + 300, 1800)
+        wait_timeout = self._resolve_request_wait_timeout(action)
         release_event = asyncio.Event()
         release_task = asyncio.create_task(
             self._wait_and_close_after_request(
@@ -805,6 +797,21 @@ class TokenBrowser:
         debug_logger.log_info(
             f"[BrowserCaptcha] Token-{self.token_id} 打码成功后进入延迟关闭，等待上游请求完成 (action={action}, timeout={wait_timeout}s)"
         )
+
+    def _resolve_request_wait_timeout(self, action: str) -> int:
+        configured_ttl = max(120, int(getattr(config, "session_ttl_seconds", 1200) or 1200))
+        flow_timeout = max(10, int(getattr(config, "flow_timeout", 300) or 300))
+        upsample_timeout = max(10, int(getattr(config, "upsample_timeout", 300) or 300))
+        action_name = str(action or "").strip().upper()
+
+        if action_name == "IMAGE_GENERATION":
+            expected = max(flow_timeout, upsample_timeout) + 120
+        elif action_name == "VIDEO_GENERATION":
+            expected = max(flow_timeout + 240, upsample_timeout + 180, 600)
+        else:
+            expected = max(flow_timeout + 180, upsample_timeout + 120, 480)
+
+        return max(120, min(configured_ttl, int(expected)))
 
     async def notify_generation_request_finished(self):
         """通知当前 Token 对应的上游图片/视频请求已结束。"""

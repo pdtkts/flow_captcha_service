@@ -3,7 +3,7 @@
 import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Dict, Optional, List
+from typing import Callable, Dict, Optional, List
 
 
 @dataclass
@@ -72,13 +72,24 @@ class SessionRegistry:
         async with self._lock:
             self._sessions.pop(session_id, None)
 
-    async def list_expired(self, ttl_seconds: int) -> List[SessionEntry]:
+    async def list_expired(
+        self,
+        ttl_seconds: int,
+        ttl_resolver: Optional[Callable[[SessionEntry], int]] = None,
+    ) -> List[SessionEntry]:
         now = datetime.utcnow()
-        deadline = now - timedelta(seconds=max(1, ttl_seconds))
         expired: List[SessionEntry] = []
 
         async with self._lock:
             for session_id, entry in list(self._sessions.items()):
+                current_ttl = max(1, int(ttl_seconds))
+                if ttl_resolver is not None:
+                    try:
+                        current_ttl = max(1, int(ttl_resolver(entry)))
+                    except Exception:
+                        current_ttl = max(1, int(ttl_seconds))
+
+                deadline = now - timedelta(seconds=current_ttl)
                 if entry.status == "pending" and entry.created_at < deadline:
                     expired.append(entry)
                     entry.status = "expired"

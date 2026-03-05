@@ -159,11 +159,32 @@ class CaptchaRuntime:
             "browser": browser_stats,
         }
 
+    def _resolve_session_timeout_seconds(self, action: str) -> int:
+        configured_ttl = max(120, int(getattr(config, "session_ttl_seconds", 1200) or 1200))
+        flow_timeout = max(10, int(getattr(config, "flow_timeout", 300) or 300))
+        upsample_timeout = max(10, int(getattr(config, "upsample_timeout", 300) or 300))
+
+        action_name = str(action or "").strip().upper()
+        if action_name == "IMAGE_GENERATION":
+            expected = max(flow_timeout, upsample_timeout) + 120
+        elif action_name == "VIDEO_GENERATION":
+            expected = max(flow_timeout + 240, upsample_timeout + 180, 600)
+        else:
+            expected = max(flow_timeout + 180, upsample_timeout + 120, 480)
+
+        return max(120, min(configured_ttl, int(expected)))
+
+    def _resolve_entry_ttl(self, entry: SessionEntry) -> int:
+        return self._resolve_session_timeout_seconds(entry.action)
+
     async def _cleanup_loop(self):
         while True:
             try:
                 await asyncio.sleep(30)
-                expired_entries = await self.registry.list_expired(config.session_ttl_seconds)
+                expired_entries = await self.registry.list_expired(
+                    config.session_ttl_seconds,
+                    ttl_resolver=self._resolve_entry_ttl,
+                )
                 if not expired_entries:
                     continue
 

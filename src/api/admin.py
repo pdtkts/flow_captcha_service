@@ -345,8 +345,8 @@ def _sanitize_system_config_updates(payload: Dict[str, Any]) -> Tuple[Dict[str, 
             section["session_ttl_seconds"] = _as_int(
                 captcha_cfg.get("session_ttl_seconds"),
                 "captcha.session_ttl_seconds",
-                60,
-                86400,
+                120,
+                7200,
             )
             changed_keys.append("captcha.session_ttl_seconds")
         if "node_name" in captcha_cfg:
