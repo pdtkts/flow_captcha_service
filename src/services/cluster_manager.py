@@ -3,6 +3,7 @@
 import asyncio
 import json
 import time
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 import urllib.error
 import urllib.parse
@@ -36,44 +37,53 @@ class ClusterManager:
             except asyncio.CancelledError:
                 pass
 
-    async def dispatch_solve(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
-        nodes = await self._select_candidate_nodes()
-        if not nodes:
-            raise RuntimeError("暂无可用子节点")
+    @staticmethod
+    def _dispatch_poll_interval_seconds() -> float:
+        return 0.35
 
+    async def dispatch_solve(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         last_error = ""
-        attempted = False
-        for node in nodes:
-            reserved = await self._try_reserve_dispatch_slot(node)
-            if not reserved:
+
+        while True:
+            nodes = await self._select_candidate_nodes()
+            if not nodes:
+                await asyncio.sleep(self._dispatch_poll_interval_seconds())
                 continue
 
-            attempted = True
-            node_id = int(node.get("id") or 0)
-            try:
-                result = await self._post_to_node(
-                    node=node,
-                    path="/api/v1/solve",
-                    json_payload=request_payload,
-                    timeout=config.cluster_master_dispatch_timeout_seconds,
+            dispatched_this_round = False
+            for node in nodes:
+                reserved = await self._try_reserve_dispatch_slot(node)
+                if not reserved:
+                    continue
+
+                dispatched_this_round = True
+                node_id = int(node.get("id") or 0)
+                try:
+                    result = await self._post_to_node(
+                        node=node,
+                        path="/api/v1/solve",
+                        json_payload=request_payload,
+                        timeout=config.cluster_master_dispatch_timeout_seconds,
+                    )
+                    child_session = str(result.get("session_id") or "").strip()
+                    token = str(result.get("token") or "").strip()
+                    if not child_session or not token:
+                        raise RuntimeError("子节点响应缺少 session_id/token")
+
+                    result["session_id"] = f"{node['id']}:{child_session}"
+                    result["node_name"] = node["node_name"]
+                    return result
+                except Exception as e:
+                    await self._release_dispatch_slot(node_id)
+                    last_error = str(e)
+                    await self.db.mark_cluster_node_error(int(node["id"]), last_error, error_type="dispatch")
+                    debug_logger.log_warning(f"[ClusterManager] dispatch solve node={node['node_name']} failed: {last_error}")
+
+            if dispatched_this_round and last_error:
+                debug_logger.log_warning(
+                    f"[ClusterManager] dispatch solve round failed, will retry: {last_error}"
                 )
-                child_session = str(result.get("session_id") or "").strip()
-                token = str(result.get("token") or "").strip()
-                if not child_session or not token:
-                    raise RuntimeError("子节点响应缺少 session_id/token")
-
-                result["session_id"] = f"{node['id']}:{child_session}"
-                result["node_name"] = node["node_name"]
-                return result
-            except Exception as e:
-                await self._release_dispatch_slot(node_id)
-                last_error = str(e)
-                await self.db.mark_cluster_node_error(int(node["id"]), last_error)
-                debug_logger.log_warning(f"[ClusterManager] dispatch solve node={node['node_name']} failed: {last_error}")
-
-        if not attempted:
-            raise RuntimeError("暂无可用子节点")
-        raise RuntimeError(f"子节点打码失败: {last_error or 'unknown'}")
+            await asyncio.sleep(self._dispatch_poll_interval_seconds())
 
     async def dispatch_finish(self, routed_session_id: str, status: str) -> Dict[str, Any]:
         node, child_session = await self._resolve_routed_session(routed_session_id)
@@ -96,48 +106,69 @@ class ClusterManager:
         )
 
     async def dispatch_custom_score(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
-        nodes = await self._select_candidate_nodes()
-        if not nodes:
-            raise RuntimeError("暂无可用子节点")
-
         last_error = ""
-        attempted = False
-        for node in nodes:
-            reserved = await self._try_reserve_dispatch_slot(node)
-            if not reserved:
+
+        while True:
+            nodes = await self._select_candidate_nodes()
+            if not nodes:
+                await asyncio.sleep(self._dispatch_poll_interval_seconds())
                 continue
 
-            attempted = True
-            node_id = int(node.get("id") or 0)
-            try:
-                result = await self._post_to_node(
-                    node=node,
-                    path="/api/v1/custom-score",
-                    json_payload=request_payload,
-                    timeout=config.cluster_master_dispatch_timeout_seconds,
-                )
-                await self._release_dispatch_slot(node_id)
-                return result
-            except Exception as e:
-                await self._release_dispatch_slot(node_id)
-                last_error = str(e)
-                await self.db.mark_cluster_node_error(int(node["id"]), last_error)
-                debug_logger.log_warning(f"[ClusterManager] dispatch custom-score node={node['node_name']} failed: {last_error}")
+            dispatched_this_round = False
+            for node in nodes:
+                reserved = await self._try_reserve_dispatch_slot(node)
+                if not reserved:
+                    continue
 
-        if not attempted:
-            raise RuntimeError("暂无可用子节点")
-        raise RuntimeError(f"子节点分数校验失败: {last_error or 'unknown'}")
+                dispatched_this_round = True
+                node_id = int(node.get("id") or 0)
+                try:
+                    result = await self._post_to_node(
+                        node=node,
+                        path="/api/v1/custom-score",
+                        json_payload=request_payload,
+                        timeout=config.cluster_master_dispatch_timeout_seconds,
+                    )
+                    await self._release_dispatch_slot(node_id)
+                    return result
+                except Exception as e:
+                    await self._release_dispatch_slot(node_id)
+                    last_error = str(e)
+                    await self.db.mark_cluster_node_error(int(node["id"]), last_error, error_type="dispatch")
+                    debug_logger.log_warning(f"[ClusterManager] dispatch custom-score node={node['node_name']} failed: {last_error}")
+
+            if dispatched_this_round and last_error:
+                debug_logger.log_warning(
+                    f"[ClusterManager] dispatch custom-score round failed, will retry: {last_error}"
+                )
+            await asyncio.sleep(self._dispatch_poll_interval_seconds())
 
     async def register_node(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        effective_capacity = self._as_positive_int(
+            payload.get("effective_capacity") or payload.get("max_concurrency"),
+            1,
+        )
+        reported_browser_count = self._as_positive_int(payload.get("browser_count"), effective_capacity)
+        reported_node_max = self._as_positive_int(payload.get("node_max_concurrency"), effective_capacity)
+
         node = await self.db.upsert_cluster_node(
             node_name=payload["node_name"],
             base_url=payload["base_url"],
             node_api_key=payload["node_api_key"],
             weight=int(payload.get("weight") or 100),
-            max_concurrency=int(payload.get("max_concurrency") or 1),
+            max_concurrency=effective_capacity,
+            reported_browser_count=reported_browser_count,
+            reported_node_max_concurrency=reported_node_max,
             active_sessions=int(payload.get("active_sessions") or 0),
             cached_sessions=int(payload.get("cached_sessions") or 0),
             healthy=bool(payload.get("healthy", True)),
+        )
+        await self.db.record_cluster_node_heartbeat(
+            node_id=int(node["id"]),
+            event_type="register",
+            payload=payload,
+            healthy=bool(payload.get("healthy", True)),
+            reason=str(payload.get("reason") or "") or None,
         )
         return {
             "success": True,
@@ -146,9 +177,19 @@ class ClusterManager:
         }
 
     async def heartbeat_node(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        effective_capacity = self._as_positive_int(
+            payload.get("effective_capacity") or payload.get("max_concurrency"),
+            1,
+        )
+        reported_browser_count = self._as_positive_int(payload.get("browser_count"), effective_capacity)
+        reported_node_max = self._as_positive_int(payload.get("node_max_concurrency"), effective_capacity)
+
         node = await self.db.heartbeat_cluster_node(
             node_name=payload["node_name"],
             base_url=payload["base_url"],
+            max_concurrency=effective_capacity,
+            reported_browser_count=reported_browser_count,
+            reported_node_max_concurrency=reported_node_max,
             active_sessions=int(payload.get("active_sessions") or 0),
             cached_sessions=int(payload.get("cached_sessions") or 0),
             healthy=bool(payload.get("healthy", True)),
@@ -158,6 +199,13 @@ class ClusterManager:
                 "success": False,
                 "message": "node_not_registered",
             }
+        await self.db.record_cluster_node_heartbeat(
+            node_id=int(node["id"]),
+            event_type="heartbeat",
+            payload=payload,
+            healthy=bool(payload.get("healthy", True)),
+            reason=str(payload.get("reason") or "") or None,
+        )
         return {
             "success": True,
             "node": node,
@@ -308,17 +356,97 @@ class ClusterManager:
                 self._dispatch_reservations.pop(node_id, None)
 
     @staticmethod
-    def decorate_node_capacity(node: Dict[str, Any], extra_active: int = 0) -> Dict[str, Any]:
+    def _as_positive_int(raw: Any, fallback: int = 1) -> int:
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = int(fallback)
+        return max(1, value)
+
+    @staticmethod
+    def _parse_db_timestamp(raw: Any) -> Optional[datetime]:
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S"):
+            try:
+                return datetime.strptime(text, fmt)
+            except ValueError:
+                continue
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            return parsed.replace(tzinfo=None)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _classify_health_reason(
+        *,
+        enabled: bool,
+        healthy: bool,
+        heartbeat_age_seconds: Optional[int],
+        stale_seconds: int,
+        last_error: str,
+    ) -> tuple[str, str]:
+        if not enabled:
+            return "disabled", "已禁用"
+
+        error_text = (last_error or "").strip()
+        lowered_error = error_text.lower()
+        auth_keywords = ("401", "unauthorized", "forbidden", "cluster key", "api key", "认证", "无效")
+        report_keywords = ("heartbeat failed", "register failed", "timed out", "timeout", "connection refused", "node_not_registered", "上报")
+
+        if any(k in lowered_error for k in auth_keywords):
+            return "auth_failed", "认证失败"
+
+        if any(k in lowered_error for k in report_keywords):
+            return "report_failed", "上报失败"
+
+        if not healthy:
+            return "report_failed", "上报失败"
+
+        if heartbeat_age_seconds is None or heartbeat_age_seconds > stale_seconds:
+            return "timeout", "超时"
+
+        return "ok", "正常"
+
+    @classmethod
+    def decorate_node_capacity(cls, node: Dict[str, Any], extra_active: int = 0) -> Dict[str, Any]:
+        effective_capacity = cls._as_positive_int(node.get("max_concurrency"), 1)
+        reported_browser_count = cls._as_positive_int(node.get("reported_browser_count"), effective_capacity)
+        reported_node_max = cls._as_positive_int(node.get("reported_node_max_concurrency"), effective_capacity)
+
         reported_active = max(0, int(node.get("active_sessions") or 0))
         active = reported_active + max(0, int(extra_active or 0))
-        total = max(1, int(node.get("max_concurrency") or 1))
-        idle = max(total - active, 0)
+        idle = max(effective_capacity - active, 0)
+
+        stale_seconds = max(10, int(config.cluster_master_node_stale_seconds))
+        heartbeat_dt = cls._parse_db_timestamp(node.get("last_heartbeat_at"))
+        heartbeat_age_seconds: Optional[int] = None
+        if heartbeat_dt is not None:
+            heartbeat_age_seconds = max(0, int((datetime.utcnow() - heartbeat_dt).total_seconds()))
+
+        reason_code, reason_text = cls._classify_health_reason(
+            enabled=bool(node.get("enabled", 1)),
+            healthy=bool(node.get("healthy", 1)),
+            heartbeat_age_seconds=heartbeat_age_seconds,
+            stale_seconds=stale_seconds,
+            last_error=str(node.get("last_error") or ""),
+        )
+
         decorated = dict(node)
-        decorated["thread_total"] = total
+        decorated["browser_count"] = reported_browser_count
+        decorated["node_max_concurrency"] = reported_node_max
+        decorated["effective_capacity"] = effective_capacity
+        decorated["thread_total"] = effective_capacity
         decorated["thread_active"] = active
         decorated["thread_idle"] = idle
         decorated["reported_active_sessions"] = reported_active
         decorated["dispatch_reserved"] = max(0, int(extra_active or 0))
+        decorated["heartbeat_age_seconds"] = heartbeat_age_seconds
+        decorated["health_reason_code"] = reason_code
+        decorated["health_reason"] = reason_text
+        decorated["is_healthy"] = bool(node.get("enabled", 1)) and reason_code == "ok"
         return decorated
 
     def decorate_nodes_capacity(self, nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -463,6 +591,9 @@ class ClusterManager:
             "node_api_key": node_api_key,
             "weight": config.cluster_node_weight,
             "max_concurrency": effective_capacity,
+            "browser_count": configured_browser_count,
+            "node_max_concurrency": configured_dispatch_limit,
+            "effective_capacity": effective_capacity,
             "active_sessions": active_sessions,
             "cached_sessions": cached_sessions,
             "healthy": True,
@@ -470,6 +601,10 @@ class ClusterManager:
         heartbeat_payload = {
             "node_name": config.node_name,
             "base_url": public_base_url,
+            "max_concurrency": effective_capacity,
+            "browser_count": configured_browser_count,
+            "node_max_concurrency": configured_dispatch_limit,
+            "effective_capacity": effective_capacity,
             "active_sessions": active_sessions,
             "cached_sessions": cached_sessions,
             "healthy": True,

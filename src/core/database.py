@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import hashlib
+import json
 import secrets
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -121,6 +122,34 @@ class Database:
 
             # 历史版本把 node_name 设为 UNIQUE，会导致同名子节点覆盖；这里统一迁移为非唯一。
             await self._migrate_cluster_nodes_schema(db)
+            await self._ensure_cluster_nodes_columns(db)
+
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS cluster_node_heartbeats (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    node_id INTEGER NOT NULL,
+                    event_type TEXT NOT NULL,
+                    healthy BOOLEAN DEFAULT 1,
+                    reason TEXT,
+                    payload_json TEXT,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(node_id) REFERENCES cluster_nodes(id)
+                )
+                """
+            )
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS cluster_node_errors (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    node_id INTEGER NOT NULL,
+                    error_type TEXT NOT NULL,
+                    error_message TEXT NOT NULL,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(node_id) REFERENCES cluster_nodes(id)
+                )
+                """
+            )
 
             await db.execute("CREATE INDEX IF NOT EXISTS idx_captcha_jobs_created_at ON captcha_jobs(created_at DESC)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_captcha_jobs_status ON captcha_jobs(status)")
@@ -128,6 +157,10 @@ class Database:
             await db.execute("CREATE INDEX IF NOT EXISTS idx_cluster_nodes_enabled ON cluster_nodes(enabled)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_cluster_nodes_heartbeat ON cluster_nodes(last_heartbeat_at DESC)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_cluster_nodes_base_url ON cluster_nodes(base_url)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_cluster_node_heartbeats_node_id ON cluster_node_heartbeats(node_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_cluster_node_heartbeats_created_at ON cluster_node_heartbeats(created_at DESC)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_cluster_node_errors_node_id ON cluster_node_errors(node_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_cluster_node_errors_created_at ON cluster_node_errors(created_at DESC)")
 
             await db.commit()
 
@@ -165,6 +198,8 @@ class Database:
                 active_sessions INTEGER DEFAULT 0,
                 cached_sessions INTEGER DEFAULT 0,
                 max_concurrency INTEGER DEFAULT 1,
+                reported_browser_count INTEGER DEFAULT 1,
+                reported_node_max_concurrency INTEGER DEFAULT 1,
                 weight INTEGER DEFAULT 100,
                 last_heartbeat_at TIMESTAMP,
                 last_error TEXT,
@@ -177,12 +212,14 @@ class Database:
             """
             INSERT INTO cluster_nodes_v2 (
                 id, node_name, base_url, node_api_key, enabled, healthy,
-                active_sessions, cached_sessions, max_concurrency, weight,
+                active_sessions, cached_sessions, max_concurrency,
+                reported_browser_count, reported_node_max_concurrency, weight,
                 last_heartbeat_at, last_error, created_at, updated_at
             )
             SELECT
                 id, node_name, base_url, node_api_key, enabled, healthy,
-                active_sessions, cached_sessions, max_concurrency, weight,
+                active_sessions, cached_sessions, max_concurrency,
+                max_concurrency, max_concurrency, weight,
                 last_heartbeat_at, last_error, created_at, updated_at
             FROM cluster_nodes
             ORDER BY id ASC
@@ -190,6 +227,24 @@ class Database:
         )
         await db.execute("DROP TABLE cluster_nodes")
         await db.execute("ALTER TABLE cluster_nodes_v2 RENAME TO cluster_nodes")
+
+    async def _ensure_cluster_nodes_columns(self, db: aiosqlite.Connection):
+        await self._add_column_if_missing(db, "cluster_nodes", "reported_browser_count", "INTEGER DEFAULT 1")
+        await self._add_column_if_missing(db, "cluster_nodes", "reported_node_max_concurrency", "INTEGER DEFAULT 1")
+
+    async def _add_column_if_missing(
+        self,
+        db: aiosqlite.Connection,
+        table_name: str,
+        column_name: str,
+        column_definition: str,
+    ):
+        cursor = await db.execute(f"PRAGMA table_info({table_name})")
+        columns = await cursor.fetchall()
+        existing = {str(col[1]) for col in columns}
+        if column_name in existing:
+            return
+        await db.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
 
     async def _ensure_defaults(self):
         async with aiosqlite.connect(self.db_path) as db:
@@ -624,6 +679,8 @@ class Database:
         node_api_key: str,
         weight: int,
         max_concurrency: int,
+        reported_browser_count: int,
+        reported_node_max_concurrency: int,
         active_sessions: int,
         cached_sessions: int,
         healthy: bool,
@@ -645,7 +702,9 @@ class Database:
                     """
                     UPDATE cluster_nodes
                     SET node_name = ?, node_api_key = ?, weight = ?, max_concurrency = ?,
+                        reported_browser_count = ?, reported_node_max_concurrency = ?,
                         active_sessions = ?, cached_sessions = ?, healthy = ?,
+                        last_error = NULL,
                         last_heartbeat_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
                     """,
@@ -654,6 +713,8 @@ class Database:
                         node_api_key,
                         max(1, int(weight)),
                         max(1, int(max_concurrency)),
+                        max(1, int(reported_browser_count)),
+                        max(1, int(reported_node_max_concurrency)),
                         max(0, int(active_sessions)),
                         max(0, int(cached_sessions)),
                         1 if healthy else 0,
@@ -665,10 +726,11 @@ class Database:
                     """
                     INSERT INTO cluster_nodes (
                         node_name, base_url, node_api_key, enabled, healthy,
-                        active_sessions, cached_sessions, max_concurrency, weight,
+                        active_sessions, cached_sessions, max_concurrency,
+                        reported_browser_count, reported_node_max_concurrency, weight,
                         last_heartbeat_at
                     )
-                    VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                     """,
                     (
                         normalized_name,
@@ -678,6 +740,8 @@ class Database:
                         max(0, int(active_sessions)),
                         max(0, int(cached_sessions)),
                         max(1, int(max_concurrency)),
+                        max(1, int(reported_browser_count)),
+                        max(1, int(reported_node_max_concurrency)),
                         max(1, int(weight)),
                     ),
                 )
@@ -698,6 +762,9 @@ class Database:
         self,
         node_name: str,
         base_url: str,
+        max_concurrency: int,
+        reported_browser_count: int,
+        reported_node_max_concurrency: int,
         active_sessions: int,
         cached_sessions: int,
         healthy: bool,
@@ -719,15 +786,22 @@ class Database:
                 """
                 UPDATE cluster_nodes
                 SET node_name = ?,
+                    max_concurrency = ?,
+                    reported_browser_count = ?,
+                    reported_node_max_concurrency = ?,
                     active_sessions = ?,
                     cached_sessions = ?,
                     healthy = ?,
+                    last_error = NULL,
                     last_heartbeat_at = CURRENT_TIMESTAMP,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 """,
                 (
                     normalized_name,
+                    max(1, int(max_concurrency)),
+                    max(1, int(reported_browser_count)),
+                    max(1, int(reported_node_max_concurrency)),
                     max(0, int(active_sessions)),
                     max(0, int(cached_sessions)),
                     1 if healthy else 0,
@@ -748,7 +822,8 @@ class Database:
             cursor = await db.execute(
                 """
                 SELECT id, node_name, base_url, enabled, healthy,
-                       active_sessions, cached_sessions, max_concurrency, weight,
+                       active_sessions, cached_sessions, max_concurrency,
+                       reported_browser_count, reported_node_max_concurrency, weight,
                        last_heartbeat_at, last_error, created_at, updated_at
                 FROM cluster_nodes
                 ORDER BY id ASC
@@ -819,11 +894,13 @@ class Database:
 
     async def delete_cluster_node(self, node_id: int) -> bool:
         async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("DELETE FROM cluster_node_heartbeats WHERE node_id = ?", (node_id,))
+            await db.execute("DELETE FROM cluster_node_errors WHERE node_id = ?", (node_id,))
             cursor = await db.execute("DELETE FROM cluster_nodes WHERE id = ?", (node_id,))
             await db.commit()
             return (cursor.rowcount or 0) > 0
 
-    async def mark_cluster_node_error(self, node_id: int, error_message: str):
+    async def mark_cluster_node_error(self, node_id: int, error_message: str, error_type: str = "runtime"):
         async with aiosqlite.connect(self.db_path) as db:
             await db.execute(
                 """
@@ -835,7 +912,89 @@ class Database:
                 """,
                 (error_message[:500], node_id),
             )
+            await db.execute(
+                """
+                INSERT INTO cluster_node_errors (node_id, error_type, error_message)
+                VALUES (?, ?, ?)
+                """,
+                (node_id, (error_type or "runtime")[:60], (error_message or "")[:500]),
+            )
             await db.commit()
+
+    async def record_cluster_node_heartbeat(
+        self,
+        node_id: int,
+        event_type: str,
+        payload: Dict[str, Any],
+        healthy: bool,
+        reason: Optional[str] = None,
+    ):
+        safe_payload = payload if isinstance(payload, dict) else {}
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO cluster_node_heartbeats (node_id, event_type, healthy, reason, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    node_id,
+                    (event_type or "heartbeat")[:32],
+                    1 if healthy else 0,
+                    (reason or "")[:300] or None,
+                    json.dumps(safe_payload, ensure_ascii=False),
+                ),
+            )
+            await db.commit()
+
+    async def list_cluster_node_heartbeats(self, node_id: int, limit: int = 20) -> List[Dict[str, Any]]:
+        safe_limit = min(max(1, int(limit or 20)), 100)
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT id, node_id, event_type, healthy, reason, payload_json, created_at
+                FROM cluster_node_heartbeats
+                WHERE node_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (node_id, safe_limit),
+            )
+            rows = await cursor.fetchall()
+
+        items: List[Dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            raw_payload = item.pop("payload_json", None)
+            parsed_payload: Dict[str, Any] = {}
+            if raw_payload:
+                try:
+                    loaded = json.loads(str(raw_payload))
+                    if isinstance(loaded, dict):
+                        parsed_payload = loaded
+                except json.JSONDecodeError:
+                    parsed_payload = {"raw": str(raw_payload)}
+            item["payload"] = parsed_payload
+            item["healthy"] = bool(item.get("healthy"))
+            items.append(item)
+        return items
+
+    async def list_cluster_node_errors(self, node_id: int, limit: int = 20) -> List[Dict[str, Any]]:
+        safe_limit = min(max(1, int(limit or 20)), 100)
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT id, node_id, error_type, error_message, created_at
+                FROM cluster_node_errors
+                WHERE node_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (node_id, safe_limit),
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
 
     async def get_available_cluster_nodes(self, stale_seconds: int) -> List[Dict[str, Any]]:
         stale_seconds = max(10, int(stale_seconds))

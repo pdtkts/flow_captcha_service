@@ -739,6 +739,33 @@ async def list_cluster_nodes(token: str = Depends(verify_admin_token)):
     }
 
 
+@router.get("/cluster/nodes/{node_id}/detail")
+async def get_cluster_node_detail(
+    node_id: int,
+    heartbeat_limit: int = Query(default=20, ge=1, le=100),
+    error_limit: int = Query(default=20, ge=1, le=100),
+    token: str = Depends(verify_admin_token),
+):
+    if _db is None:
+        raise HTTPException(status_code=500, detail="服务未初始化")
+    _assert_master_role("子节点诊断详情")
+
+    node = await _db.get_cluster_node(node_id)
+    if not node:
+        raise HTTPException(status_code=404, detail="节点不存在")
+
+    item = _cluster.decorate_node_capacity(node) if _cluster is not None else node
+    heartbeats = await _db.list_cluster_node_heartbeats(node_id=node_id, limit=heartbeat_limit)
+    errors = await _db.list_cluster_node_errors(node_id=node_id, limit=error_limit)
+
+    return {
+        "success": True,
+        "item": item,
+        "heartbeats": heartbeats,
+        "errors": errors,
+    }
+
+
 @router.patch("/cluster/nodes/{node_id}")
 async def update_cluster_node(
     node_id: int,

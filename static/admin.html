@@ -72,6 +72,27 @@
       font-weight:600;
       white-space:nowrap;
     }
+    .nav-tabs{
+      display:flex;
+      gap:8px;
+      flex-wrap:wrap;
+      margin-top:12px;
+    }
+    .nav-tab{
+      border:1px solid #cbd5e1;
+      border-radius:999px;
+      padding:8px 14px;
+      font-size:12px;
+      color:#0f172a;
+      background:#fff;
+      cursor:pointer;
+      font-weight:700;
+    }
+    .nav-tab.active{
+      color:#fff;
+      background:linear-gradient(120deg,#0f172a,#1e293b);
+      border-color:transparent;
+    }
     .panel{
       background:var(--panel);
       border:1px solid var(--line);
@@ -134,6 +155,85 @@
     table{width:100%;border-collapse:collapse;margin-top:12px;font-size:13px}
     th,td{border-bottom:1px solid #edf2f7;padding:9px 8px;text-align:left;vertical-align:middle}
     th{color:#475569;font-weight:700;background:#f8fafc}
+    .status-badge{
+      display:inline-block;
+      border-radius:999px;
+      padding:2px 8px;
+      font-size:12px;
+      font-weight:700;
+      border:1px solid #cbd5e1;
+      color:#334155;
+      background:#fff;
+      white-space:nowrap;
+    }
+    .status-badge.ok{color:#166534;border-color:#86efac;background:#dcfce7}
+    .status-badge.err{color:#991b1b;border-color:#fecaca;background:#fee2e2}
+    .status-badge.warn{color:#92400e;border-color:#fcd34d;background:#fef3c7}
+    .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace}
+    .page{display:none}
+    .page.active{display:block}
+    .drawer-backdrop{
+      position:fixed;
+      inset:0;
+      z-index:998;
+      background:rgba(15,23,42,.35);
+      display:none;
+    }
+    .drawer-backdrop.show{display:block}
+    .drawer{
+      position:fixed;
+      top:0;
+      right:0;
+      width:min(760px,96vw);
+      height:100vh;
+      z-index:999;
+      background:#fff;
+      border-left:1px solid #dbe4ef;
+      box-shadow:-10px 0 24px rgba(15,23,42,.15);
+      transform:translateX(100%);
+      transition:transform .2s ease;
+      display:flex;
+      flex-direction:column;
+    }
+    .drawer.show{transform:translateX(0)}
+    .drawer-head{
+      display:flex;
+      align-items:center;
+      justify-content:space-between;
+      gap:8px;
+      padding:14px 16px;
+      border-bottom:1px solid #e2e8f0;
+      background:#f8fafc;
+    }
+    .drawer-head h3{margin:0;font-size:16px}
+    .drawer-content{
+      padding:14px 16px 20px;
+      overflow:auto;
+      display:flex;
+      flex-direction:column;
+      gap:12px;
+    }
+    .drawer-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+    .payload-box{
+      margin-top:8px;
+      background:#0b1220;
+      color:#e2e8f0;
+      border-radius:8px;
+      border:1px solid #1e293b;
+      padding:8px;
+      font-size:12px;
+      line-height:1.45;
+      max-height:220px;
+      overflow:auto;
+      white-space:pre-wrap;
+      word-break:break-word;
+    }
+    .timeline-item{
+      border:1px solid #dbe4ef;
+      border-radius:10px;
+      padding:10px;
+      background:#fff;
+    }
     .hidden{display:none!important}
     #dashboard{display:none}
     #loginPanel{
@@ -173,6 +273,7 @@
       .brand-dot{width:12px;height:12px;margin-top:7px}
       .title{font-size:22px}
       .grid,.cards,.login-grid{grid-template-columns:1fr}
+      .drawer-grid{grid-template-columns:1fr}
       #loginPanel{margin-top:16px}
       .login-hero{padding:16px}
       .login-hero h2{font-size:21px}
@@ -211,140 +312,190 @@
     </section>
 
     <div id="dashboard">
-      <section id="guidePanel" class="panel hidden">
-        <h2>首次部署引导</h2>
-        <p id="guideSummary" class="panel-desc"></p>
-        <ul id="guideItems" class="guide-items"></ul>
-        <ol id="guideSteps" class="guide-steps"></ol>
-      </section>
+      <div id="dashboardNav" class="nav-tabs">
+        <button id="navOverview" class="nav-tab active" data-page="overview">概览</button>
+        <button id="navConfig" class="nav-tab" data-page="config">系统配置</button>
+        <button id="navCluster" class="nav-tab hidden" data-page="cluster">集群诊断</button>
+        <button id="navApiKeys" class="nav-tab hidden" data-page="apikeys">API Key</button>
+        <button id="navLogs" class="nav-tab" data-page="logs">日志</button>
+      </div>
 
-      <section class="panel">
-        <h2>运行概览</h2>
-        <div class="cards">
-          <div class="card"><div class="k">活跃会话</div><div id="statActive" class="v">-</div></div>
-          <div class="card"><div class="k">缓存会话</div><div id="statCached" class="v">-</div></div>
-          <div class="card"><div class="k">累计任务数</div><div id="statTotal" class="v">-</div></div>
-          <div class="card"><div class="k">启用 API Key 数</div><div id="statEnabledKey" class="v">-</div></div>
-          <div class="card"><div id="statThreadTotalLabel" class="k">总线程数</div><div id="statThreadTotal" class="v">-</div></div>
-          <div class="card"><div id="statThreadIdleLabel" class="k">空闲线程数</div><div id="statThreadIdle" class="v">-</div></div>
-        </div>
-        <div class="actions"><button id="refreshAllBtn" class="secondary">刷新数据</button><button id="logoutBtn" class="secondary">退出登录</button></div>
-      </section>
+      <div id="pageOverview" class="page active">
+        <section id="guidePanel" class="panel hidden">
+          <h2>首次部署引导</h2>
+          <p id="guideSummary" class="panel-desc"></p>
+          <ul id="guideItems" class="guide-items"></ul>
+          <ol id="guideSteps" class="guide-steps"></ol>
+        </section>
 
-      <section class="panel">
-        <h2>管理员账号</h2>
-        <p class="panel-desc">只要修改密码成功，旧密码立即失效。</p>
-        <div class="grid">
-          <div class="field"><label>当前用户名</label><input id="adminCurrentUser" readonly /></div>
-          <div class="field"><label>新用户名</label><input id="adminNewUser" placeholder="可选" /></div>
-          <div class="field"><label>当前密码</label><input id="adminOldPassword" type="password" placeholder="必填" /></div>
-          <div class="field"><label>新密码</label><input id="adminNewPassword" type="password" placeholder="不少于 6 位" /></div>
-        </div>
-        <div class="actions"><button id="saveAdminBtn">保存管理员账号</button></div>
-      </section>
-
-      <section class="panel">
-        <h2>系统配置（setting.toml）</h2>
-        <p class="panel-desc">按当前角色显示必需字段。主节点不会显示子节点字段，子节点不会显示主节点字段。</p>
-
-        <div class="grid">
-          <div class="field"><label>部署角色</label><select id="cfgRole"><option value="standalone">单机（standalone）</option><option value="master">主节点（master）</option><option value="subnode">子节点（subnode）</option></select><div class="hint">切换角色后，部分配置需重启服务生效。</div></div>
-          <div class="field"><label>节点名称</label><input id="cfgNodeName" /></div>
-          <div class="field"><label>监听地址</label><input id="cfgServerHost" /></div>
-          <div class="field"><label>监听端口</label><input id="cfgServerPort" type="number" min="1" max="65535" /></div>
-        </div>
-
-        <div class="grid">
-          <div class="field"><label>日志级别</label><select id="cfgLogLevel"><option value="DEBUG">DEBUG</option><option value="INFO">INFO</option><option value="WARNING">WARNING</option><option value="ERROR">ERROR</option><option value="CRITICAL">CRITICAL</option></select></div>
-          <div class="field"><label>流程超时（秒）</label><input id="cfgFlowTimeout" type="number" min="10" /></div>
-          <div class="field"><label>放大超时（秒）</label><input id="cfgUpsampleTimeout" type="number" min="10" /></div>
-          <div class="field"><label>会话保留时长（秒）</label><input id="cfgSessionTtl" type="number" min="60" /></div>
-        </div>
-
-        <div id="masterConfigPanel" class="hidden">
-          <div class="grid">
-            <div class="field"><label>子节点判定离线阈值（秒）</label><input id="cfgMasterNodeStale" type="number" min="10" /><div class="hint">超过该时长未心跳，主节点视其不可用。</div></div>
-            <div class="field"><label>主节点调度超时（秒）</label><input id="cfgMasterDispatchTimeout" type="number" min="5" /><div class="hint">主节点等待子节点响应的最长时间。</div></div>
+        <section class="panel">
+          <h2>运行概览</h2>
+          <div class="cards">
+            <div class="card"><div class="k">活跃会话</div><div id="statActive" class="v">-</div></div>
+            <div class="card"><div class="k">缓存会话</div><div id="statCached" class="v">-</div></div>
+            <div class="card"><div class="k">累计任务数</div><div id="statTotal" class="v">-</div></div>
+            <div class="card"><div class="k">启用 API Key 数</div><div id="statEnabledKey" class="v">-</div></div>
+            <div class="card"><div id="statThreadTotalLabel" class="k">总线程数</div><div id="statThreadTotal" class="v">-</div></div>
+            <div class="card"><div id="statThreadIdleLabel" class="k">空闲线程数</div><div id="statThreadIdle" class="v">-</div></div>
           </div>
-        </div>
+          <p id="clusterStatsHint" class="panel-desc hidden">统计口径说明：总线程=有效容量总和；空闲线程=有效容量-活跃会话。</p>
+          <div class="actions"><button id="refreshAllBtn" class="secondary">刷新数据</button><button id="logoutBtn" class="secondary">退出登录</button></div>
+        </section>
+      </div>
 
-        <div id="subnodeConfigPanel" class="hidden">
+      <div id="pageConfig" class="page">
+        <section class="panel">
+          <h2>管理员账号</h2>
+          <p class="panel-desc">只要修改密码成功，旧密码立即失效。</p>
           <div class="grid">
-            <div class="field"><label>主节点地址</label><input id="cfgMasterBaseUrl" placeholder="http://master:8060" /></div>
-            <div class="field"><label>集群密钥（Cluster Key）</label><input id="cfgMasterClusterKey" placeholder="fcs_cluster_..." /></div>
-            <div class="field"><label>子节点对外地址</label><input id="cfgNodePublicUrl" placeholder="http://subnode:8060" /></div>
-            <div class="field"><label>子节点 API Key</label><input id="cfgNodeApiKey" placeholder="node_api_key_..." /></div>
+            <div class="field"><label>当前用户名</label><input id="adminCurrentUser" readonly /></div>
+            <div class="field"><label>新用户名</label><input id="adminNewUser" placeholder="可选" /></div>
+            <div class="field"><label>当前密码</label><input id="adminOldPassword" type="password" placeholder="必填" /></div>
+            <div class="field"><label>新密码</label><input id="adminNewPassword" type="password" placeholder="不少于 6 位" /></div>
           </div>
+          <div class="actions"><button id="saveAdminBtn">保存管理员账号</button></div>
+        </section>
+
+        <section class="panel">
+          <h2>系统配置（setting.toml）</h2>
+          <p class="panel-desc">按当前角色显示必需字段。主节点不会显示子节点字段，子节点不会显示主节点字段。</p>
+
           <div class="grid">
-            <div class="field"><label>心跳间隔（秒）</label><input id="cfgHeartbeatSeconds" type="number" min="5" /></div>
-            <div class="field"><label>节点权重</label><input id="cfgNodeWeight" type="number" min="1" /></div>
-            <div class="field"><label>节点最大并发</label><input id="cfgNodeMaxConcurrency" type="number" min="1" /></div>
+            <div class="field"><label>部署角色</label><select id="cfgRole"><option value="standalone">单机（standalone）</option><option value="master">主节点（master）</option><option value="subnode">子节点（subnode）</option></select><div class="hint">切换角色后，部分配置需重启服务生效。</div></div>
+            <div class="field"><label>节点名称</label><input id="cfgNodeName" /></div>
+            <div class="field"><label>监听地址</label><input id="cfgServerHost" /></div>
+            <div class="field"><label>监听端口</label><input id="cfgServerPort" type="number" min="1" max="65535" /></div>
           </div>
-        </div>
 
-        <details class="advanced">
-          <summary>高级参数（一般不用改）</summary>
           <div class="grid">
-            <div class="field"><label>数据库文件路径</label><input id="cfgDbPath" /></div>
-            <div class="field"><label>浏览器后台启动</label><select id="cfgLaunchBg"><option value="true">启用</option><option value="false">关闭</option></select></div>
-            <div class="field"><label>DOM 等待秒数</label><input id="cfgDomWait" type="number" step="0.1" min="1" /></div>
-            <div class="field"><label>reCAPTCHA 稳定等待秒数</label><input id="cfgSettle" type="number" step="0.1" min="0" /></div>
+            <div class="field"><label>日志级别</label><select id="cfgLogLevel"><option value="DEBUG">DEBUG</option><option value="INFO">INFO</option><option value="WARNING">WARNING</option><option value="ERROR">ERROR</option><option value="CRITICAL">CRITICAL</option></select></div>
+            <div class="field"><label>流程超时（秒）</label><input id="cfgFlowTimeout" type="number" min="10" /></div>
+            <div class="field"><label>放大超时（秒）</label><input id="cfgUpsampleTimeout" type="number" min="10" /></div>
+            <div class="field"><label>会话保留时长（秒）</label><input id="cfgSessionTtl" type="number" min="60" /></div>
           </div>
-          <div class="grid"><div class="field"><label>分数测试预热秒数</label><input id="cfgWarmup" type="number" step="0.1" min="0" /></div></div>
-        </details>
 
-        <div class="actions"><button id="saveSystemBtn">保存系统配置</button></div>
-      </section>
+          <div id="masterConfigPanel" class="hidden">
+            <div class="grid">
+              <div class="field"><label>子节点判定离线阈值（秒）</label><input id="cfgMasterNodeStale" type="number" min="10" /><div class="hint">超过该时长未心跳，主节点视其不可用。</div></div>
+              <div class="field"><label>主节点调度超时（秒）</label><input id="cfgMasterDispatchTimeout" type="number" min="5" /><div class="hint">主节点等待子节点响应的最长时间。</div></div>
+            </div>
+          </div>
 
-      <section id="runtimeConfigPanel" class="panel hidden">
-        <h2>运行时打码配置（数据库）</h2>
-        <p class="panel-desc">仅子节点/单机模式需要。主节点不执行本地浏览器打码，因此不会显示此区块。</p>
-        <div class="grid">
-          <div class="field"><label>浏览器并发数（browser_count）</label><input id="rtBrowserCount" type="number" min="1" /><div class="hint">建议先从 1 开始，确认稳定后再逐步提高。</div></div>
-          <div class="field"><label>浏览器代理池（browser_proxy_url）</label><textarea id="rtProxyUrl" placeholder="支持单条代理，或多条代理池。可用换行、逗号、分号分隔。"></textarea><div id="rtProxyPoolHint" class="hint">当前未配置代理池。</div></div>
-        </div>
-        <label class="checkbox-line"><input id="rtProxyEnabled" type="checkbox" /> 启用浏览器代理</label>
-        <div class="actions"><button id="saveRuntimeBtn">保存运行时配置</button></div>
-      </section>
+          <div id="subnodeConfigPanel" class="hidden">
+            <div class="grid">
+              <div class="field"><label>主节点地址</label><input id="cfgMasterBaseUrl" placeholder="http://master:8060" /></div>
+              <div class="field"><label>集群密钥（Cluster Key）</label><input id="cfgMasterClusterKey" placeholder="fcs_cluster_..." /></div>
+              <div class="field"><label>子节点对外地址</label><input id="cfgNodePublicUrl" placeholder="http://subnode:8060" /></div>
+              <div class="field"><label>子节点 API Key</label><input id="cfgNodeApiKey" placeholder="node_api_key_..." /></div>
+            </div>
+            <div class="grid">
+              <div class="field"><label>心跳间隔（秒）</label><input id="cfgHeartbeatSeconds" type="number" min="5" /></div>
+              <div class="field"><label>节点权重</label><input id="cfgNodeWeight" type="number" min="1" /></div>
+              <div class="field"><label>节点最大并发</label><input id="cfgNodeMaxConcurrency" type="number" min="1" /></div>
+            </div>
+          </div>
 
-      <section id="masterClusterPanel" class="panel hidden">
-        <h2>主节点集群管理</h2>
-        <p class="panel-desc">调度上限由子节点上报容量自动同步，需在子节点侧调整线程相关配置。</p>
-        <div class="grid">
-          <div class="field"><label>当前 Cluster Key</label><input id="clusterKey" readonly /></div>
-          <div class="field"><label>当前节点名称</label><input id="clusterNodeName" readonly /></div>
-        </div>
-        <div class="actions"><button id="rotateClusterKeyBtn" class="warn">轮换 Cluster Key</button><button id="refreshNodesBtn" class="secondary">刷新子节点列表</button></div>
-        <div class="table-wrap"><table><thead><tr><th>ID</th><th>节点名</th><th>子节点对外地址</th><th>健康</th><th>启用</th><th>总线程</th><th>空闲线程</th><th>调度上限</th><th>权重</th><th>最近心跳</th><th>操作</th></tr></thead><tbody id="clusterNodesTable"></tbody></table></div>
-      </section>
+          <details class="advanced">
+            <summary>高级参数（一般不用改）</summary>
+            <div class="grid">
+              <div class="field"><label>数据库文件路径</label><input id="cfgDbPath" /></div>
+              <div class="field"><label>浏览器后台启动</label><select id="cfgLaunchBg"><option value="true">启用</option><option value="false">关闭</option></select></div>
+              <div class="field"><label>DOM 等待秒数</label><input id="cfgDomWait" type="number" step="0.1" min="1" /></div>
+              <div class="field"><label>reCAPTCHA 稳定等待秒数</label><input id="cfgSettle" type="number" step="0.1" min="0" /></div>
+            </div>
+            <div class="grid"><div class="field"><label>分数测试预热秒数</label><input id="cfgWarmup" type="number" step="0.1" min="0" /></div></div>
+          </details>
 
-      <section id="masterApiKeyPanel" class="panel hidden">
-        <h2>主节点 API Key 管理</h2>
-        <div class="grid">
-          <div class="field"><label>Key 名称</label><input id="newApiKeyName" placeholder="例如：flow2api-prod" /></div>
-          <div class="field"><label>可用次数（留空=不限）</label><input id="newApiKeyQuota" type="number" min="0" /></div>
-        </div>
-        <div class="actions"><button id="createApiKeyBtn">创建 API Key</button><button id="refreshApiKeyBtn" class="secondary">刷新 API Key 列表</button></div>
-        <div id="newApiKeyText" class="panel-desc"></div>
-        <div class="table-wrap"><table><thead><tr><th>ID</th><th>名称</th><th>Key 前缀</th><th>启用</th><th>剩余次数</th><th>已用次数</th><th>操作</th></tr></thead><tbody id="apiKeysTable"></tbody></table></div>
-      </section>
+          <div class="actions"><button id="saveSystemBtn">保存系统配置</button></div>
+        </section>
 
-      <section class="panel">
-        <h2>调用日志（最近 30 条）</h2>
-        <div class="actions"><button id="refreshLogsBtn" class="secondary">刷新日志</button></div>
-        <div class="table-wrap"><table><thead><tr><th>时间</th><th>会话 ID</th><th>项目 ID</th><th>动作</th><th>状态</th><th>错误原因</th></tr></thead><tbody id="logsTable"></tbody></table></div>
-      </section>
+        <section id="runtimeConfigPanel" class="panel hidden">
+          <h2>运行时打码配置（数据库）</h2>
+          <p class="panel-desc">仅子节点/单机模式需要。主节点不执行本地浏览器打码，因此不会显示此区块。</p>
+          <div class="grid">
+            <div class="field"><label>浏览器并发数（browser_count）</label><input id="rtBrowserCount" type="number" min="1" /><div class="hint">建议先从 1 开始，确认稳定后再逐步提高。</div></div>
+            <div class="field"><label>浏览器代理池（browser_proxy_url）</label><textarea id="rtProxyUrl" placeholder="支持单条代理，或多条代理池。可用换行、逗号、分号分隔。"></textarea><div id="rtProxyPoolHint" class="hint">当前未配置代理池。</div></div>
+          </div>
+          <label class="checkbox-line"><input id="rtProxyEnabled" type="checkbox" /> 启用浏览器代理</label>
+          <div class="actions"><button id="saveRuntimeBtn">保存运行时配置</button></div>
+        </section>
+      </div>
+
+      <div id="pageCluster" class="page">
+        <section id="masterClusterPanel" class="panel hidden">
+          <h2>主节点集群诊断</h2>
+          <p class="panel-desc">容量拆分口径：effective_capacity=min(browser_count,node_max_concurrency)。调度上限由子节点上报自动同步。</p>
+          <div class="grid">
+            <div class="field"><label>当前 Cluster Key</label><input id="clusterKey" readonly /></div>
+            <div class="field"><label>当前节点名称</label><input id="clusterNodeName" readonly /></div>
+          </div>
+          <div class="actions"><button id="rotateClusterKeyBtn" class="warn">轮换 Cluster Key</button><button id="refreshNodesBtn" class="secondary">刷新子节点列表</button></div>
+          <div class="table-wrap"><table><thead><tr><th>ID</th><th>节点名</th><th>子节点对外地址</th><th>健康</th><th>启用</th><th>browser_count</th><th>node_max_concurrency</th><th>effective_capacity</th><th>活跃线程</th><th>空闲线程</th><th>心跳延迟(s)</th><th>异常原因</th><th>权重</th><th>最近心跳</th><th>操作</th></tr></thead><tbody id="clusterNodesTable"></tbody></table></div>
+        </section>
+      </div>
+
+      <div id="pageApiKeys" class="page">
+        <section id="masterApiKeyPanel" class="panel hidden">
+          <h2>主节点 API Key 管理</h2>
+          <div class="grid">
+            <div class="field"><label>Key 名称</label><input id="newApiKeyName" placeholder="例如：flow2api-prod" /></div>
+            <div class="field"><label>可用次数（留空=不限）</label><input id="newApiKeyQuota" type="number" min="0" /></div>
+          </div>
+          <div class="actions"><button id="createApiKeyBtn">创建 API Key</button><button id="refreshApiKeyBtn" class="secondary">刷新 API Key 列表</button></div>
+          <div id="newApiKeyText" class="panel-desc"></div>
+          <div class="table-wrap"><table><thead><tr><th>ID</th><th>名称</th><th>Key 前缀</th><th>启用</th><th>剩余次数</th><th>已用次数</th><th>操作</th></tr></thead><tbody id="apiKeysTable"></tbody></table></div>
+        </section>
+      </div>
+
+      <div id="pageLogs" class="page">
+        <section class="panel">
+          <h2>调用日志（最近 30 条）</h2>
+          <div class="actions"><button id="refreshLogsBtn" class="secondary">刷新日志</button></div>
+          <div class="table-wrap"><table><thead><tr><th>时间</th><th>会话 ID</th><th>项目 ID</th><th>动作</th><th>状态</th><th>错误原因</th></tr></thead><tbody id="logsTable"></tbody></table></div>
+        </section>
+      </div>
     </div>
   </div>
+
+  <div id="nodeDetailBackdrop" class="drawer-backdrop hidden"></div>
+  <aside id="nodeDetailDrawer" class="drawer hidden" aria-hidden="true">
+    <div class="drawer-head">
+      <h3 id="nodeDetailTitle">节点详情</h3>
+      <button id="closeNodeDetailBtn" class="secondary">关闭</button>
+    </div>
+    <div class="drawer-content">
+      <section class="panel" style="margin-top:0">
+        <h2>节点快照</h2>
+        <div id="nodeDetailSummary" class="drawer-grid"></div>
+      </section>
+      <section class="panel" style="margin-top:0">
+        <h2>最近心跳原始 Payload</h2>
+        <div id="nodeHeartbeatList"></div>
+      </section>
+      <section class="panel" style="margin-top:0">
+        <h2>最近错误</h2>
+        <div id="nodeErrorList"></div>
+      </section>
+    </div>
+  </aside>
 
   <script>
     (() => {
       const TOKEN_STORAGE_KEY = "fcs_admin_token";
-      const state = { token: "", role: "unknown" };
+      const state = { token: "", role: "unknown", page: "overview" };
       const roleTextMap = { master: "主节点（master）", subnode: "子节点（subnode）", standalone: "单机（standalone）", unknown: "未知" };
       const q = (id) => document.getElementById(id);
       const toInt = (v, d) => Number.isFinite(Number(v)) ? Math.floor(Number(v)) : d;
       const toFloat = (v, d) => Number.isFinite(Number(v)) ? Number(v) : d;
+      const esc = (v) => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      const pageNames = ["overview", "config", "cluster", "apikeys", "logs"];
+      const pageElementMap = {
+        overview: "pageOverview",
+        config: "pageConfig",
+        cluster: "pageCluster",
+        apikeys: "pageApiKeys",
+        logs: "pageLogs",
+      };
 
       const showToast = (m, kind = "ok") => {
         const e = document.createElement("div");
@@ -367,6 +518,30 @@
         e.textContent = `检测到环境变量覆盖：${keys.join("、")}。这些项可能无法通过页面直接改动。`;
       };
 
+      const setActivePage = (page) => {
+        const target = pageNames.includes(page) ? page : "overview";
+        state.page = target;
+        for (const name of pageNames) {
+          const pageEl = q(pageElementMap[name]);
+          if (!pageEl) continue;
+          pageEl.classList.toggle("active", name === target);
+        }
+        document.querySelectorAll(".nav-tab[data-page]").forEach((el) => {
+          if (!(el instanceof HTMLElement)) return;
+          el.classList.toggle("active", el.dataset.page === target);
+        });
+      };
+
+      const refreshNavByRole = () => {
+        const isMaster = state.role === "master";
+        q("navCluster").classList.toggle("hidden", !isMaster);
+        q("navApiKeys").classList.toggle("hidden", !isMaster);
+        q("clusterStatsHint").classList.toggle("hidden", !isMaster);
+        if (!isMaster && (state.page === "cluster" || state.page === "apikeys")) {
+          setActivePage("overview");
+        }
+      };
+
       const req = async (url, opt = {}) => {
         const headers = Object.assign({}, opt.headers || {});
         if (state.token) headers.Authorization = `Bearer ${state.token}`;
@@ -376,6 +551,7 @@
         if (r.status === 401 && state.token) {
           state.token = ""; state.role = "unknown";
           localStorage.removeItem(TOKEN_STORAGE_KEY);
+          closeNodeDetailDrawer();
           q("dashboard").style.display = "none";
           q("loginPanel").classList.remove("hidden");
           q("roleBadge").textContent = "当前角色：未登录";
@@ -388,6 +564,7 @@
       const applyRoleLayout = (role) => {
         const real = role || "unknown";
         q("roleBadge").textContent = `当前角色：${roleTextMap[real] || real}`;
+        state.role = real;
         const isMaster = real === "master";
         const isSubnode = real === "subnode";
         q("runtimeConfigPanel").classList.toggle("hidden", isMaster);
@@ -395,6 +572,7 @@
         q("subnodeConfigPanel").classList.toggle("hidden", !isSubnode);
         q("masterClusterPanel").classList.toggle("hidden", !isMaster);
         q("masterApiKeyPanel").classList.toggle("hidden", !isMaster);
+        refreshNavByRole();
       };
 
       const renderGuide = (guide) => {
@@ -516,8 +694,8 @@
         q("statTotal").textContent = String(r.db?.jobs_total ?? "-");
         q("statEnabledKey").textContent = String(r.db?.api_key_enabled_total ?? "-");
         if (state.role === "master") {
-          q("statThreadTotalLabel").textContent = "集群总线程";
-          q("statThreadIdleLabel").textContent = "集群空闲线程";
+          q("statThreadTotalLabel").textContent = "集群总线程（有效容量）";
+          q("statThreadIdleLabel").textContent = "集群空闲线程（有效容量-活跃）";
           q("statThreadTotal").textContent = String(r.cluster?.total_thread_capacity ?? "-");
           q("statThreadIdle").textContent = String(r.cluster?.total_idle_capacity ?? "-");
         } else {
@@ -560,15 +738,92 @@
           b.appendChild(tr);
         }
       };
+      const closeNodeDetailDrawer = () => {
+        q("nodeDetailBackdrop").classList.add("hidden");
+        q("nodeDetailBackdrop").classList.remove("show");
+        q("nodeDetailDrawer").classList.add("hidden");
+        q("nodeDetailDrawer").classList.remove("show");
+      };
+      const openNodeDetailDrawer = () => {
+        q("nodeDetailBackdrop").classList.remove("hidden");
+        q("nodeDetailBackdrop").classList.add("show");
+        q("nodeDetailDrawer").classList.remove("hidden");
+        q("nodeDetailDrawer").classList.add("show");
+      };
+      const renderNodeDetail = (detail = {}) => {
+        const item = detail.item || {};
+        q("nodeDetailTitle").textContent = `节点详情 #${item.id ?? "-"}`;
+        const summary = q("nodeDetailSummary");
+        summary.innerHTML = "";
+        const summaryFields = [
+          ["节点名", item.node_name || "-"],
+          ["地址", item.base_url || "-"],
+          ["健康状态", item.is_healthy ? "健康" : "异常"],
+          ["异常原因", item.health_reason || "-"],
+          ["心跳延迟(s)", item.heartbeat_age_seconds ?? "-"],
+          ["browser_count", item.browser_count ?? "-"],
+          ["node_max_concurrency", item.node_max_concurrency ?? "-"],
+          ["effective_capacity", item.effective_capacity ?? "-"],
+          ["活跃线程", item.thread_active ?? "-"],
+          ["空闲线程", item.thread_idle ?? "-"],
+        ];
+        for (const [k, v] of summaryFields) {
+          const wrap = document.createElement("div");
+          wrap.className = "field";
+          wrap.innerHTML = `<label>${esc(k)}</label><input value="${esc(v)}" readonly />`;
+          summary.appendChild(wrap);
+        }
+
+        const heartbeatList = q("nodeHeartbeatList");
+        heartbeatList.innerHTML = "";
+        const heartbeats = Array.isArray(detail.heartbeats) ? detail.heartbeats : [];
+        if (!heartbeats.length) {
+          const empty = document.createElement("div");
+          empty.className = "panel-desc";
+          empty.textContent = "暂无心跳历史。";
+          heartbeatList.appendChild(empty);
+        } else {
+          for (const hb of heartbeats) {
+            const itemEl = document.createElement("div");
+            itemEl.className = "timeline-item";
+            const payloadText = JSON.stringify(hb.payload || {}, null, 2);
+            const reasonText = hb.reason ? ` · 原因: ${hb.reason}` : "";
+            itemEl.innerHTML = `<div><strong>${esc(hb.event_type || "-")}</strong> · ${esc(hb.created_at || "-")} · ${hb.healthy ? "healthy" : "unhealthy"}${esc(reasonText)}</div><pre class="payload-box mono">${esc(payloadText)}</pre>`;
+            heartbeatList.appendChild(itemEl);
+          }
+        }
+
+        const errorList = q("nodeErrorList");
+        errorList.innerHTML = "";
+        const errors = Array.isArray(detail.errors) ? detail.errors : [];
+        if (!errors.length) {
+          const empty = document.createElement("div");
+          empty.className = "panel-desc";
+          empty.textContent = "暂无错误记录。";
+          errorList.appendChild(empty);
+        } else {
+          for (const err of errors) {
+            const itemEl = document.createElement("div");
+            itemEl.className = "timeline-item";
+            itemEl.innerHTML = `<div><strong>${esc(err.error_type || "runtime")}</strong> · ${esc(err.created_at || "-")}</div><div class="panel-desc mono" style="margin-top:6px">${esc(err.error_message || "")}</div>`;
+            errorList.appendChild(itemEl);
+          }
+        }
+      };
+      const loadNodeDetail = async (nodeId) => {
+        const detail = await req(`/api/admin/cluster/nodes/${nodeId}/detail?heartbeat_limit=20&error_limit=20`);
+        renderNodeDetail(detail || {});
+        openNodeDetailDrawer();
+      };
       const loadClusterNodes = async () => {
         if (state.role !== "master") return;
         const r = await req("/api/admin/cluster/nodes");
         const b = q("clusterNodesTable"); b.innerHTML = "";
         for (const it of (r.items || [])) {
           const tr = document.createElement("tr");
-          const threadTotal = it.thread_total ?? it.max_concurrency ?? 1;
-          const scheduleLimitText = `${it.max_concurrency ?? threadTotal}<span class="hint" style="display:block">自动同步</span>`;
-          tr.innerHTML = `<td>${it.id}</td><td>${it.node_name || "-"}</td><td>${it.base_url || "-"}</td><td>${it.healthy ? "健康" : "异常"}</td><td><input type="checkbox" data-node-id="${it.id}" data-node-key="enabled" ${it.enabled ? "checked" : ""} /></td><td>${threadTotal}</td><td>${it.thread_idle ?? "-"}</td><td>${scheduleLimitText}</td><td><input data-node-id="${it.id}" data-node-key="weight" value="${it.weight ?? 100}" /></td><td>${it.last_heartbeat_at || "-"}</td><td><div class="actions" style="margin-top:0"><button class="secondary" data-action="save-node" data-id="${it.id}">保存</button><button class="warn" data-action="delete-node" data-id="${it.id}">删除</button></div></td>`;
+          const healthClass = it.is_healthy ? "ok" : "err";
+          const healthText = it.is_healthy ? "健康" : "异常";
+          tr.innerHTML = `<td>${it.id}</td><td>${esc(it.node_name || "-")}</td><td>${esc(it.base_url || "-")}</td><td><span class="status-badge ${healthClass}">${healthText}</span></td><td><input type="checkbox" data-node-id="${it.id}" data-node-key="enabled" ${it.enabled ? "checked" : ""} /></td><td>${it.browser_count ?? "-"}</td><td>${it.node_max_concurrency ?? "-"}</td><td>${it.effective_capacity ?? it.thread_total ?? "-"}</td><td>${it.thread_active ?? "-"}</td><td>${it.thread_idle ?? "-"}</td><td>${it.heartbeat_age_seconds ?? "-"}</td><td>${esc(it.health_reason || "-")}</td><td><input data-node-id="${it.id}" data-node-key="weight" value="${it.weight ?? 100}" /></td><td>${it.last_heartbeat_at || "-"}</td><td><div class="actions" style="margin-top:0"><button class="secondary" data-action="detail-node" data-id="${it.id}">详情</button><button class="secondary" data-action="save-node" data-id="${it.id}">保存</button><button class="warn" data-action="delete-node" data-id="${it.id}">删除</button></div></td>`;
           b.appendChild(tr);
         }
       };
@@ -577,6 +832,7 @@
         if (!cachedToken) return;
         state.token = cachedToken;
         try {
+          setActivePage("overview");
           q("loginPanel").classList.add("hidden");
           q("dashboard").style.display = "block";
           await loadAll();
@@ -590,13 +846,24 @@
           q("roleBadge").textContent = "当前角色：未登录";
         }
       };
-      const loadAll = async () => { clearNotice(); await loadProfile(); await loadStats(); await loadSystem(); await loadClusterConfig(); await loadRuntime(); await loadLogs(); await loadApiKeys(); await loadClusterNodes(); };
+      const loadAll = async () => {
+        clearNotice();
+        await loadProfile();
+        await loadSystem();
+        await loadStats();
+        await loadClusterConfig();
+        await loadRuntime();
+        await loadLogs();
+        await loadApiKeys();
+        await loadClusterNodes();
+      };
       q("loginBtn").addEventListener("click", async () => {
         clearNotice();
         try {
           const r = await req("/api/admin/login", { method: "POST", body: { username: q("loginUsername").value.trim(), password: q("loginPassword").value } });
           state.token = r.token; state.role = r.role || "unknown";
           localStorage.setItem(TOKEN_STORAGE_KEY, state.token);
+          setActivePage("overview");
           q("loginPanel").classList.add("hidden"); q("dashboard").style.display = "block";
           await loadAll();
           showNotice("登录成功，后台已加载。", "ok");
@@ -607,11 +874,22 @@
         try { if (state.token) await req("/api/admin/logout", { method: "POST" }); } catch (_) {}
         state.token = ""; state.role = "unknown";
         localStorage.removeItem(TOKEN_STORAGE_KEY);
+        closeNodeDetailDrawer();
+        setActivePage("overview");
         q("dashboard").style.display = "none"; q("loginPanel").classList.remove("hidden"); q("roleBadge").textContent = "当前角色：未登录"; clearNotice();
       });
       q("refreshAllBtn").addEventListener("click", async () => { try { await loadAll(); showNotice("全部数据已刷新。", "ok"); } catch (err) { showNotice(`刷新失败：${err.message}`, "err"); } });
       q("refreshLogsBtn").addEventListener("click", async () => { try { await loadLogs(); showNotice("日志已刷新。", "ok"); } catch (err) { showNotice(`日志刷新失败：${err.message}`, "err"); } });
       q("cfgRole").addEventListener("change", () => applyRoleLayout(roleOfForm()));
+      q("dashboardNav").addEventListener("click", (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLElement)) return;
+        const page = target.dataset.page;
+        if (!page) return;
+        setActivePage(page);
+      });
+      q("closeNodeDetailBtn").addEventListener("click", closeNodeDetailDrawer);
+      q("nodeDetailBackdrop").addEventListener("click", closeNodeDetailDrawer);
 
       q("saveAdminBtn").addEventListener("click", async () => {
         try {
@@ -694,6 +972,16 @@
             await req(`/api/admin/apikeys/${id}`, { method: "PATCH", body: { name, enabled, quota_remaining: quotaRaw === "" ? null : toInt(quotaRaw, 0) } });
             await loadApiKeys(); showNotice(`API Key #${id} 已保存。`, "ok");
           } catch (err) { showNotice(`保存 API Key 失败：${err.message}`, "err"); }
+        }
+
+        if (target.dataset.action === "detail-node") {
+          const id = Number(target.dataset.id);
+          if (!Number.isFinite(id) || id <= 0) return;
+          try {
+            await loadNodeDetail(id);
+          } catch (err) {
+            showNotice(`加载节点详情失败：${err.message}`, "err");
+          }
         }
 
         if (target.dataset.action === "save-node") {

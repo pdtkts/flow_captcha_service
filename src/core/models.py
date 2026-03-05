@@ -102,6 +102,9 @@ class ClusterRegisterRequest(BaseModel):
     node_api_key: str = Field(min_length=1)
     weight: int = Field(default=100, ge=1)
     max_concurrency: int = Field(default=1, ge=1)
+    browser_count: int = Field(default=1, ge=1)
+    node_max_concurrency: int = Field(default=1, ge=1)
+    effective_capacity: int = Field(default=1, ge=1)
     active_sessions: int = Field(default=0, ge=0)
     cached_sessions: int = Field(default=0, ge=0)
     healthy: bool = True
@@ -110,6 +113,10 @@ class ClusterRegisterRequest(BaseModel):
 class ClusterHeartbeatRequest(BaseModel):
     node_name: str = Field(min_length=1, max_length=120)
     base_url: str = Field(min_length=1)
+    max_concurrency: int = Field(default=1, ge=1)
+    browser_count: int = Field(default=1, ge=1)
+    node_max_concurrency: int = Field(default=1, ge=1)
+    effective_capacity: int = Field(default=1, ge=1)
     active_sessions: int = Field(default=0, ge=0)
     cached_sessions: int = Field(default=0, ge=0)
     healthy: bool = True
