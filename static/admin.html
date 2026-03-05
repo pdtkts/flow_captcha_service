@@ -155,6 +155,57 @@
     table{width:100%;border-collapse:collapse;margin-top:12px;font-size:13px}
     th,td{border-bottom:1px solid #edf2f7;padding:9px 8px;text-align:left;vertical-align:middle}
     th{color:#475569;font-weight:700;background:#f8fafc}
+    .cluster-toolbar{
+      margin-top:12px;
+      display:grid;
+      grid-template-columns:2fr 1.2fr 1fr;
+      gap:10px;
+      align-items:end;
+    }
+    .cluster-toolbar .field{margin:0}
+    .cluster-kpis{
+      margin-top:12px;
+      display:grid;
+      grid-template-columns:repeat(5,minmax(0,1fr));
+      gap:10px;
+    }
+    .cluster-kpi{
+      border:1px solid #dbe4ef;
+      border-radius:12px;
+      padding:10px;
+      background:linear-gradient(180deg,#ffffff,#f8fbff);
+    }
+    .cluster-kpi .k{font-size:12px;color:#64748b}
+    .cluster-kpi .v{margin-top:5px;font-size:21px;font-weight:700;color:#0f172a}
+    .cluster-kpi .s{margin-top:4px;font-size:11px;color:#64748b}
+    .cluster-result{margin-top:8px;font-size:12px;color:#64748b}
+    .cluster-wrap{
+      margin-top:8px;
+      max-height:62vh;
+      border:1px solid #dbe4ef;
+      border-radius:12px;
+      background:#fff;
+      overflow:auto;
+    }
+    .cluster-table{margin-top:0}
+    .cluster-table th{
+      position:sticky;
+      top:0;
+      z-index:1;
+      background:#f8fafc;
+    }
+    .cluster-table tbody tr:nth-child(even){background:#fcfdff}
+    .cluster-table tbody tr:hover{background:#f1f5f9}
+    .reason-badge{display:inline-flex;align-items:center;gap:4px}
+    .input-mini{
+      width:82px;
+      border:1px solid #cbd5e1;
+      border-radius:8px;
+      padding:6px 8px;
+      font-size:12px;
+      color:#0f172a;
+      background:#fff;
+    }
     .status-badge{
       display:inline-block;
       border-radius:999px;
@@ -266,6 +317,8 @@
     @media (max-width:1000px){
       .title{font-size:27px}
       .grid,.cards{grid-template-columns:repeat(2,minmax(0,1fr))}
+      .cluster-kpis{grid-template-columns:repeat(3,minmax(0,1fr))}
+      .cluster-toolbar{grid-template-columns:1fr 1fr}
     }
     @media (max-width:640px){
       .container{padding-top:12px}
@@ -274,6 +327,7 @@
       .title{font-size:22px}
       .grid,.cards,.login-grid{grid-template-columns:1fr}
       .drawer-grid{grid-template-columns:1fr}
+      .cluster-kpis,.cluster-toolbar{grid-template-columns:1fr}
       #loginPanel{margin-top:16px}
       .login-hero{padding:16px}
       .login-hero h2{font-size:21px}
@@ -430,7 +484,20 @@
             <div class="field"><label>当前节点名称</label><input id="clusterNodeName" readonly /></div>
           </div>
           <div class="actions"><button id="rotateClusterKeyBtn" class="warn">轮换 Cluster Key</button><button id="refreshNodesBtn" class="secondary">刷新子节点列表</button></div>
-          <div class="table-wrap"><table><thead><tr><th>ID</th><th>节点名</th><th>子节点对外地址</th><th>健康</th><th>启用</th><th>browser_count</th><th>node_max_concurrency</th><th>effective_capacity</th><th>活跃线程</th><th>空闲线程</th><th>心跳延迟(s)</th><th>异常原因</th><th>权重</th><th>最近心跳</th><th>操作</th></tr></thead><tbody id="clusterNodesTable"></tbody></table></div>
+          <div class="cluster-kpis">
+            <div class="cluster-kpi"><div class="k">节点总数</div><div id="clusterKpiNodeTotal" class="v">-</div><div class="s">已启用：<span id="clusterKpiNodeEnabled">-</span></div></div>
+            <div class="cluster-kpi"><div class="k">健康节点</div><div id="clusterKpiHealthy" class="v">-</div><div class="s">异常：<span id="clusterKpiUnhealthy">-</span></div></div>
+            <div class="cluster-kpi"><div class="k">有效总容量</div><div id="clusterKpiCapacity" class="v">-</div><div class="s">Σ effective_capacity</div></div>
+            <div class="cluster-kpi"><div class="k">空闲容量</div><div id="clusterKpiIdle" class="v">-</div><div class="s">Σ thread_idle</div></div>
+            <div class="cluster-kpi"><div class="k">平均心跳延迟</div><div id="clusterKpiHeartbeat" class="v">-</div><div class="s">单位：秒</div></div>
+          </div>
+          <div class="cluster-toolbar">
+            <div class="field"><label>搜索节点</label><input id="clusterSearchInput" placeholder="按节点名、地址、异常原因过滤" /></div>
+            <div class="field"><label>健康筛选</label><select id="clusterHealthFilter"><option value="all">全部</option><option value="healthy">仅健康</option><option value="abnormal">仅异常</option><option value="timeout">仅超时</option><option value="report_failed">仅上报失败</option><option value="auth_failed">仅认证失败</option><option value="disabled">仅已禁用</option></select></div>
+            <div class="field"><label>最近刷新</label><input id="clusterLastUpdated" readonly placeholder="未刷新" /></div>
+          </div>
+          <div id="clusterResultHint" class="cluster-result">显示 0/0 个节点</div>
+          <div class="table-wrap cluster-wrap"><table class="cluster-table"><thead><tr><th>ID</th><th>节点名</th><th>子节点对外地址</th><th>健康</th><th>启用</th><th>browser_count</th><th>node_max_concurrency</th><th>effective_capacity</th><th>活跃线程</th><th>空闲线程</th><th>心跳延迟(s)</th><th>异常原因</th><th>权重</th><th>最近心跳</th><th>操作</th></tr></thead><tbody id="clusterNodesTable"></tbody></table></div>
         </section>
       </div>
 
@@ -482,7 +549,14 @@
   <script>
     (() => {
       const TOKEN_STORAGE_KEY = "fcs_admin_token";
-      const state = { token: "", role: "unknown", page: "overview" };
+      const state = {
+        token: "",
+        role: "unknown",
+        page: "overview",
+        clusterNodes: [],
+        clusterSearch: "",
+        clusterHealthFilter: "all",
+      };
       const roleTextMap = { master: "主节点（master）", subnode: "子节点（subnode）", standalone: "单机（standalone）", unknown: "未知" };
       const q = (id) => document.getElementById(id);
       const toInt = (v, d) => Number.isFinite(Number(v)) ? Math.floor(Number(v)) : d;
@@ -815,17 +889,97 @@
         renderNodeDetail(detail || {});
         openNodeDetailDrawer();
       };
-      const loadClusterNodes = async () => {
-        if (state.role !== "master") return;
-        const r = await req("/api/admin/cluster/nodes");
-        const b = q("clusterNodesTable"); b.innerHTML = "";
-        for (const it of (r.items || [])) {
+      const resolveReasonBadgeClass = (reasonCode) => {
+        const code = String(reasonCode || "").toLowerCase();
+        if (code === "ok") return "ok";
+        if (code === "timeout" || code === "disabled") return "warn";
+        if (code === "report_failed" || code === "auth_failed") return "err";
+        return "warn";
+      };
+      const resolveHeartbeatBadgeClass = (seconds) => {
+        if (!Number.isFinite(seconds)) return "warn";
+        if (seconds <= 20) return "ok";
+        if (seconds <= 60) return "warn";
+        return "err";
+      };
+      const passClusterFilter = (item) => {
+        const filter = String(state.clusterHealthFilter || "all");
+        const reasonCode = String(item.health_reason_code || "");
+        if (filter === "healthy" && !item.is_healthy) return false;
+        if (filter === "abnormal" && item.is_healthy) return false;
+        if (filter !== "all" && filter !== "healthy" && filter !== "abnormal" && filter !== reasonCode) return false;
+
+        const keyword = String(state.clusterSearch || "").trim().toLowerCase();
+        if (!keyword) return true;
+        const haystack = [
+          item.node_name,
+          item.base_url,
+          item.health_reason,
+          item.health_reason_code,
+        ].map((x) => String(x || "").toLowerCase()).join(" ");
+        return haystack.includes(keyword);
+      };
+      const renderClusterKpis = (items) => {
+        const list = Array.isArray(items) ? items : [];
+        const total = list.length;
+        const enabled = list.filter((x) => !!x.enabled).length;
+        const healthy = list.filter((x) => !!x.is_healthy).length;
+        const unhealthy = Math.max(total - healthy, 0);
+        const totalCapacity = list.reduce((sum, x) => sum + toInt(x.effective_capacity ?? x.thread_total, 0), 0);
+        const idleCapacity = list.reduce((sum, x) => sum + toInt(x.thread_idle, 0), 0);
+        const hbAges = list.map((x) => Number(x.heartbeat_age_seconds)).filter((x) => Number.isFinite(x));
+        const avgHeartbeat = hbAges.length ? Math.round(hbAges.reduce((a, b) => a + b, 0) / hbAges.length) : null;
+
+        q("clusterKpiNodeTotal").textContent = String(total);
+        q("clusterKpiNodeEnabled").textContent = String(enabled);
+        q("clusterKpiHealthy").textContent = String(healthy);
+        q("clusterKpiUnhealthy").textContent = String(unhealthy);
+        q("clusterKpiCapacity").textContent = String(totalCapacity);
+        q("clusterKpiIdle").textContent = String(idleCapacity);
+        q("clusterKpiHeartbeat").textContent = avgHeartbeat === null ? "-" : String(avgHeartbeat);
+      };
+      const renderClusterNodes = () => {
+        const allItems = Array.isArray(state.clusterNodes) ? state.clusterNodes : [];
+        const filtered = allItems
+          .filter(passClusterFilter)
+          .sort((a, b) => {
+            const aHealthy = a.is_healthy ? 1 : 0;
+            const bHealthy = b.is_healthy ? 1 : 0;
+            if (aHealthy !== bHealthy) return aHealthy - bHealthy;
+            const aDelay = Number(a.heartbeat_age_seconds);
+            const bDelay = Number(b.heartbeat_age_seconds);
+            if (Number.isFinite(aDelay) && Number.isFinite(bDelay) && aDelay !== bDelay) return bDelay - aDelay;
+            return toInt(a.id, 0) - toInt(b.id, 0);
+          });
+        renderClusterKpis(allItems);
+        q("clusterResultHint").textContent = `显示 ${filtered.length}/${allItems.length} 个节点`;
+
+        const b = q("clusterNodesTable");
+        b.innerHTML = "";
+        if (!filtered.length) {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `<td colspan="15" style="text-align:center;color:#64748b;padding:16px 8px">当前筛选条件下无节点</td>`;
+          b.appendChild(tr);
+          return;
+        }
+        for (const it of filtered) {
           const tr = document.createElement("tr");
           const healthClass = it.is_healthy ? "ok" : "err";
           const healthText = it.is_healthy ? "健康" : "异常";
-          tr.innerHTML = `<td>${it.id}</td><td>${esc(it.node_name || "-")}</td><td>${esc(it.base_url || "-")}</td><td><span class="status-badge ${healthClass}">${healthText}</span></td><td><input type="checkbox" data-node-id="${it.id}" data-node-key="enabled" ${it.enabled ? "checked" : ""} /></td><td>${it.browser_count ?? "-"}</td><td>${it.node_max_concurrency ?? "-"}</td><td>${it.effective_capacity ?? it.thread_total ?? "-"}</td><td>${it.thread_active ?? "-"}</td><td>${it.thread_idle ?? "-"}</td><td>${it.heartbeat_age_seconds ?? "-"}</td><td>${esc(it.health_reason || "-")}</td><td><input data-node-id="${it.id}" data-node-key="weight" value="${it.weight ?? 100}" /></td><td>${it.last_heartbeat_at || "-"}</td><td><div class="actions" style="margin-top:0"><button class="secondary" data-action="detail-node" data-id="${it.id}">详情</button><button class="secondary" data-action="save-node" data-id="${it.id}">保存</button><button class="warn" data-action="delete-node" data-id="${it.id}">删除</button></div></td>`;
+          const reasonClass = resolveReasonBadgeClass(it.health_reason_code);
+          const ageNumber = Number(it.heartbeat_age_seconds);
+          const ageClass = resolveHeartbeatBadgeClass(ageNumber);
+          const ageText = Number.isFinite(ageNumber) ? String(ageNumber) : "-";
+          tr.innerHTML = `<td>${it.id}</td><td>${esc(it.node_name || "-")}</td><td class="mono">${esc(it.base_url || "-")}</td><td><span class="status-badge ${healthClass}">${healthText}</span></td><td><input type="checkbox" data-node-id="${it.id}" data-node-key="enabled" ${it.enabled ? "checked" : ""} /></td><td class="mono">${it.browser_count ?? "-"}</td><td class="mono">${it.node_max_concurrency ?? "-"}</td><td class="mono"><strong>${it.effective_capacity ?? it.thread_total ?? "-"}</strong></td><td>${it.thread_active ?? "-"}</td><td>${it.thread_idle ?? "-"}</td><td><span class="status-badge ${ageClass}">${ageText}</span></td><td><span class="status-badge ${reasonClass} reason-badge">${esc(it.health_reason || "-")}</span></td><td><input class="input-mini mono" data-node-id="${it.id}" data-node-key="weight" value="${it.weight ?? 100}" /></td><td>${it.last_heartbeat_at || "-"}</td><td><div class="actions" style="margin-top:0"><button class="secondary" data-action="detail-node" data-id="${it.id}">详情</button><button class="secondary" data-action="save-node" data-id="${it.id}">保存</button><button class="warn" data-action="delete-node" data-id="${it.id}">删除</button></div></td>`;
           b.appendChild(tr);
         }
+      };
+      const loadClusterNodes = async () => {
+        if (state.role !== "master") return;
+        const r = await req("/api/admin/cluster/nodes");
+        state.clusterNodes = Array.isArray(r.items) ? r.items : [];
+        q("clusterLastUpdated").value = new Date().toLocaleString("zh-CN", { hour12: false });
+        renderClusterNodes();
       };
       const tryRestoreLogin = async () => {
         const cachedToken = localStorage.getItem(TOKEN_STORAGE_KEY);
@@ -887,6 +1041,18 @@
         const page = target.dataset.page;
         if (!page) return;
         setActivePage(page);
+      });
+      q("clusterSearchInput").addEventListener("input", (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLInputElement)) return;
+        state.clusterSearch = target.value || "";
+        renderClusterNodes();
+      });
+      q("clusterHealthFilter").addEventListener("change", (event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLSelectElement)) return;
+        state.clusterHealthFilter = target.value || "all";
+        renderClusterNodes();
       });
       q("closeNodeDetailBtn").addEventListener("click", closeNodeDetailDrawer);
       q("nodeDetailBackdrop").addEventListener("click", closeNodeDetailDrawer);
