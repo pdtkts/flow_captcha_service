@@ -135,13 +135,27 @@ def _ensure_playwright_installed() -> bool:
 def _ensure_browser_installed() -> bool:
     """确保 chromium 浏览器已安装"""
     try:
-        from playwright.sync_api import sync_playwright
-        with sync_playwright() as p:
-            # 尝试获取浏览器路径，如果失败说明未安装
-            browser_path = p.chromium.executable_path
-            if browser_path and os.path.exists(browser_path):
-                debug_logger.log_info(f"[BrowserCaptcha] chromium 浏览器已安装: {browser_path}")
-                return True
+        # 通过子进程探测，避免在 asyncio 事件循环内使用 sync_api 触发误判。
+        probe_code = (
+            "from playwright.sync_api import sync_playwright\n"
+            "with sync_playwright() as p:\n"
+            "    b = p.chromium.launch(headless=True, args=['--no-sandbox'])\n"
+            "    b.close()\n"
+            "print('ok')\n"
+        )
+        result = subprocess.run(
+            [sys.executable, "-c", probe_code],
+            capture_output=True,
+            text=True,
+            timeout=45,
+            env=os.environ.copy(),
+        )
+        if result.returncode == 0:
+            debug_logger.log_info("[BrowserCaptcha] chromium 浏览器已安装并可用")
+            return True
+        probe_err = (result.stderr or "").strip()
+        if probe_err:
+            debug_logger.log_info(f"[BrowserCaptcha] chromium 可用性探测失败: {probe_err[:240]}")
     except Exception as e:
         debug_logger.log_info(f"[BrowserCaptcha] 检测浏览器时出错: {e}")
     
@@ -443,6 +457,12 @@ class TokenBrowser:
         }
         
         try:
+            background_launch_args = [
+                '--start-minimized',
+                '--disable-background-timer-throttling',
+                '--disable-renderer-backgrounding',
+                '--disable-backgrounding-occluded-windows',
+            ]
             browser_args = [
                 '--disable-blink-features=AutomationControlled',
                 '--disable-quic',
@@ -458,27 +478,41 @@ class TokenBrowser:
             ]
 
             if launch_in_background:
-                browser_args.extend([
-                    '--start-minimized',
-                    '--disable-background-timer-throttling',
-                    '--disable-renderer-backgrounding',
-                    '--disable-backgrounding-occluded-windows',
-                ])
+                browser_args.extend(background_launch_args)
                 if sys.platform.startswith("win"):
                     browser_args.append('--window-position=-32000,-32000')
                 debug_logger.log_info(
                     f"[BrowserCaptcha] Token-{self.token_id} 有头浏览器将以后台模式启动"
                 )
 
-            browser = await playwright.chromium.launch(
-                headless=False,
-                proxy=proxy_option,
-                args=browser_args
-            )
+            launch_mode = "headed"
+            try:
+                browser = await playwright.chromium.launch(
+                    headless=False,
+                    proxy=proxy_option,
+                    args=browser_args
+                )
+            except Exception as headed_error:
+                # Docker 有头浏览器对 Xvfb/Display 强依赖，失效时自动降级到无头，避免直接 500。
+                if IS_DOCKER:
+                    fallback_args = [arg for arg in browser_args if arg not in background_launch_args]
+                    debug_logger.log_warning(
+                        f"[BrowserCaptcha] Token-{self.token_id} 有头启动失败，自动降级无头重试: "
+                        f"{type(headed_error).__name__}: {str(headed_error)[:160]}"
+                    )
+                    browser = await playwright.chromium.launch(
+                        headless=True,
+                        proxy=proxy_option,
+                        args=fallback_args
+                    )
+                    launch_mode = "headless-fallback"
+                else:
+                    raise
             context = await browser.new_context(
                 user_agent=random_ua,
                 viewport=viewport,
             )
+            self._last_fingerprint["launch_mode"] = launch_mode
             return playwright, browser, context
         except Exception as e:
             debug_logger.log_error(f"[BrowserCaptcha] Token-{self.token_id} 启动浏览器失败: {type(e).__name__}: {str(e)[:200]}")
@@ -1327,9 +1361,9 @@ class BrowserCaptchaService:
                 "如需启用请设置环境变量 ALLOW_DOCKER_HEADED_CAPTCHA=true，并提供 DISPLAY/Xvfb。"
             )
         if IS_DOCKER and not os.environ.get("DISPLAY"):
-            raise RuntimeError(
+            debug_logger.log_warning(
                 "Docker 有头浏览器打码已启用，但 DISPLAY 未设置。"
-                "请设置 DISPLAY（例如 :99）并启动 Xvfb。"
+                "将尝试自动降级为无头模式。"
             )
         if not PLAYWRIGHT_AVAILABLE or async_playwright is None:
             raise RuntimeError(
