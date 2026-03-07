@@ -22,6 +22,12 @@ class CaptchaRuntime:
         if self._cleanup_task and not self._cleanup_task.done():
             return
         self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+        if config.cluster_role != "master":
+            try:
+                service = await self._get_browser_service()
+                await service.warmup_browser_slots()
+            except Exception as e:
+                debug_logger.log_warning(f"[CaptchaRuntime] browser warmup failed: {e}")
 
     async def _get_browser_service(self):
         if config.cluster_role == "master":

@@ -1678,6 +1678,8 @@ class BrowserCaptchaService:
         self._round_robin_index = 0  # Round-robin cursor
         self._proxy_pool_cursor_by_key: Dict[str, int] = {}
         self._proxy_pool_lock = asyncio.Lock()
+        self._project_slot_affinity: Dict[str, List[int]] = {}
+        self._project_slot_lock = asyncio.Lock()
         
         # Metrics
         self._stats = {
@@ -1733,26 +1735,33 @@ class BrowserCaptchaService:
         debug_logger.log_info(f"[BrowserCaptcha] 并发上限: {self._browser_count}")
     
     async def reload_browser_count(self):
-        """重新加载浏览器数量配置（用于配置更新后热重载）"""
+        """???????????????????????"""
         old_count = self._browser_count
         await self._load_browser_count()
         
-        # 如果数量减少，移除多余的浏览器实例
         browsers_to_close: List[TokenBrowser] = []
         if self._browser_count < old_count:
             async with self._browsers_lock:
                 for browser_id in list(self._browsers.keys()):
                     if browser_id >= self._browser_count:
                         browsers_to_close.append(self._browsers.pop(browser_id))
-                        debug_logger.log_info(f"[BrowserCaptcha] 移除多余浏览器实例 {browser_id}")
+                        debug_logger.log_info(f"[BrowserCaptcha] ????????? {browser_id}")
 
         for browser in browsers_to_close:
             try:
                 await browser.force_close_pending_browser(close_all=True)
                 await browser.recycle_browser(reason="browser_slot_removed", rotate_profile=False)
             except Exception as e:
-                debug_logger.log_warning(f"[BrowserCaptcha] 缩容关闭浏览器实例失败: {e}")
-    
+                debug_logger.log_warning(f"[BrowserCaptcha] ???????????: {e}")
+
+        async with self._project_slot_lock:
+            pruned: Dict[str, List[int]] = {}
+            for project_key, slots in self._project_slot_affinity.items():
+                valid_slots = [slot for slot in slots if 0 <= slot < self._browser_count]
+                if valid_slots:
+                    pruned[project_key] = valid_slots
+            self._project_slot_affinity = pruned
+
     def _log_stats(self):
         total = self._stats["req_total"]
         gen_fail = self._stats["gen_fail"]
@@ -1765,6 +1774,57 @@ class BrowserCaptchaService:
         rate = (valid_success / total * 100) if total > 0 else 0.0
 
     
+    async def _warmup_browser_slot(self, browser_id: int):
+        browser = await self._get_or_create_browser(browser_id)
+        try:
+            await browser._get_or_create_shared_browser()
+            debug_logger.log_info(f"[BrowserCaptcha] warmed browser slot {browser_id}")
+        except Exception as e:
+            debug_logger.log_warning(f"[BrowserCaptcha] warmup for slot {browser_id} failed: {e}")
+
+    async def warmup_browser_slots(self):
+        tasks = [self._warmup_browser_slot(browser_id) for browser_id in range(self._browser_count)]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    async def _select_browser_id(self, project_id: Optional[str]) -> int:
+        project_key = str(project_id or '').strip()
+        affinity_slots: List[int] = []
+        if project_key:
+            async with self._project_slot_lock:
+                affinity_slots = [slot for slot in self._project_slot_affinity.get(project_key, []) if 0 <= slot < self._browser_count]
+                self._project_slot_affinity[project_key] = affinity_slots
+
+        async with self._browsers_lock:
+            def is_slot_idle(slot_id: int) -> bool:
+                browser = self._browsers.get(slot_id)
+                return browser is None or not getattr(browser, 'is_busy', lambda: False)()
+
+            for slot_id in affinity_slots:
+                if is_slot_idle(slot_id):
+                    return slot_id
+
+            for offset in range(self._browser_count):
+                slot_id = (self._round_robin_index + offset) % self._browser_count
+                if is_slot_idle(slot_id):
+                    self._round_robin_index = (slot_id + 1) % self._browser_count
+                    if project_key:
+                        async with self._project_slot_lock:
+                            slots = [slot for slot in self._project_slot_affinity.get(project_key, []) if 0 <= slot < self._browser_count]
+                            if slot_id not in slots:
+                                slots.append(slot_id)
+                            self._project_slot_affinity[project_key] = slots
+                    return slot_id
+
+        slot_id = self._get_next_browser_id()
+        if project_key:
+            async with self._project_slot_lock:
+                slots = [slot for slot in self._project_slot_affinity.get(project_key, []) if 0 <= slot < self._browser_count]
+                if slot_id not in slots:
+                    slots.append(slot_id)
+                self._project_slot_affinity[project_key] = slots
+        return slot_id
+
     async def _get_or_create_browser(self, browser_id: int) -> TokenBrowser:
         """获取或创建指定 ID 的浏览器实例"""
         async with self._browsers_lock:
@@ -1887,7 +1947,7 @@ class BrowserCaptchaService:
 
         if self._token_semaphore:
             async with self._token_semaphore:
-                browser_id = self._get_next_browser_id()
+                browser_id = await self._select_browser_id(project_id)
                 browser = await self._get_or_create_browser(browser_id)
                 token, request_ref = await browser.get_token(
                     project_id,
@@ -1904,7 +1964,7 @@ class BrowserCaptchaService:
             self._log_stats()
             return token, self._compose_browser_ref(browser_id, request_ref)
 
-        browser_id = self._get_next_browser_id()
+        browser_id = await self._select_browser_id(project_id)
         browser = await self._get_or_create_browser(browser_id)
         token, request_ref = await browser.get_token(
             project_id,
@@ -2093,6 +2153,7 @@ class BrowserCaptchaService:
             "configured_browser_count": self._browser_count,
             "busy_browser_count": busy_browser_count,
             "idle_browser_count": max(self._browser_count - busy_browser_count, 0),
+            "project_affinity_count": len(self._project_slot_affinity),
             "browsers": []
         }
         return base_stats
