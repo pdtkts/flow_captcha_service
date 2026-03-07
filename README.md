@@ -219,3 +219,6 @@ docker pull ghcr.io/genz27/flow_captcha_service-headed:latest
 3. 删除旧 tag 本地缓存后再拉取并重启容器
 
 本仓库已将有头镜像启动方式改为内联 `bash` 启动流程，不再依赖脚本文件执行，可避免该错误。
+
+
+- `cluster.node_max_concurrency = 0` means the dispatcher follows `captcha.browser_count`.

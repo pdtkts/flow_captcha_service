@@ -677,6 +677,12 @@ class ClusterManager:
         configured_browser_count = max(1, configured_browser_count or int(config.browser_count))
         configured_dispatch_limit = max(1, int(config.cluster_node_max_concurrency))
         effective_capacity = max(1, min(configured_browser_count, configured_dispatch_limit))
+        if configured_dispatch_limit < configured_browser_count:
+            debug_logger.log_warning(
+                f"[ClusterManager] dispatch capacity limited by cluster.node_max_concurrency: "
+                f"browser_count={configured_browser_count}, node_max_concurrency={configured_dispatch_limit}, "
+                f"effective_capacity={effective_capacity}"
+            )
 
         register_payload = {
             "node_name": config.node_name,

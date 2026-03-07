@@ -20,7 +20,7 @@
       - FCS_CLUSTER_NODE_PUBLIC_BASE_URL=http://host.docker.internal:8061
       - FCS_CLUSTER_NODE_API_KEY=replace-with-node-internal-key
       - FCS_CLUSTER_NODE_WEIGHT=100
-      - FCS_CLUSTER_NODE_MAX_CONCURRENCY=1
+      - FCS_CLUSTER_NODE_MAX_CONCURRENCY=0
     volumes:
       - ./data:/app/data
       - ./config:/app/config

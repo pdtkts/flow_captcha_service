@@ -52,6 +52,22 @@ def _toml_literal(value: Any) -> str:
     return _toml_quote(str(value))
 
 
+
+
+def _positive_int_or_fallback(value: Any, fallback: int) -> int:
+    if value is None:
+        return max(1, int(fallback))
+    text = str(value).strip()
+    if text == "":
+        return max(1, int(fallback))
+    try:
+        number = int(text)
+    except Exception:
+        return max(1, int(fallback))
+    if number <= 0:
+        return max(1, int(fallback))
+    return number
+
 class Config:
     ORDERED_TOP_SECTIONS = ("server", "storage", "admin", "captcha", "log", "cluster")
     ENV_OVERRIDE_KEYS = (
@@ -151,7 +167,7 @@ class Config:
                 "node_api_key": "",
                 "heartbeat_interval_seconds": 15,
                 "node_weight": 100,
-                "node_max_concurrency": 1,
+                "node_max_concurrency": 0,
                 "master_node_stale_seconds": 120,
                 "master_dispatch_timeout_seconds": 45,
             },
@@ -411,10 +427,15 @@ class Config:
 
     @property
     def cluster_node_max_concurrency(self) -> int:
-        value = os.getenv("FCS_CLUSTER_NODE_MAX_CONCURRENCY")
-        if value:
-            return max(1, int(value))
-        return max(1, int(self._get("cluster", "node_max_concurrency", self.browser_count)))
+        fallback = self.browser_count
+        env_value = os.getenv("FCS_CLUSTER_NODE_MAX_CONCURRENCY")
+        if env_value is not None and str(env_value).strip() != "":
+            return _positive_int_or_fallback(env_value, fallback)
+
+        raw_user_cfg = self._read_user_config()
+        cluster_cfg = raw_user_cfg.get("cluster", {}) if isinstance(raw_user_cfg, dict) else {}
+        explicit_value = cluster_cfg.get("node_max_concurrency") if isinstance(cluster_cfg, dict) else None
+        return _positive_int_or_fallback(explicit_value, fallback)
 
     @property
     def cluster_master_node_stale_seconds(self) -> int:
