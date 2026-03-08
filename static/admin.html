@@ -62,6 +62,7 @@
       text-wrap:balance;
     }
     .subtitle{margin:7px 0 0;color:var(--muted);font-size:13px;line-height:1.5}
+    .topbar-side{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end}
     .role-badge{
       padding:8px 14px;
       border-radius:999px;
@@ -70,6 +71,21 @@
       font-size:12px;
       color:#1e293b;
       font-weight:600;
+      white-space:nowrap;
+    }
+    .portal-link{
+      display:inline-flex;
+      align-items:center;
+      justify-content:center;
+      gap:6px;
+      padding:8px 14px;
+      border-radius:999px;
+      border:1px solid #cbd5e1;
+      color:#0f172a;
+      background:#fff;
+      font-size:12px;
+      font-weight:700;
+      text-decoration:none;
       white-space:nowrap;
     }
     .nav-tabs{
@@ -532,7 +548,10 @@
           <p class="subtitle">简化配置、中文提示、按角色展示：主节点/子节点/单机模式</p>
         </div>
       </div>
-      <div id="roleBadge" class="role-badge">当前角色：未登录</div>
+      <div class="topbar-side">
+        <a class="portal-link" href="/">用户门户</a>
+        <div id="roleBadge" class="role-badge">当前角色：未登录</div>
+      </div>
     </div>
 
     <div id="notice" class="notice"></div>
@@ -558,6 +577,8 @@
         <button id="navConfig" class="nav-tab" data-page="config">系统配置</button>
         <button id="navCluster" class="nav-tab hidden" data-page="cluster">集群诊断</button>
         <button id="navApiKeys" class="nav-tab hidden" data-page="apikeys">API Key</button>
+        <button id="navUsers" class="nav-tab hidden" data-page="users">用户</button>
+        <button id="navCdks" class="nav-tab hidden" data-page="cdks">CDK</button>
         <button id="navLogs" class="nav-tab" data-page="logs">日志</button>
       </div>
 
@@ -708,6 +729,31 @@
         </section>
       </div>
 
+      <div id="pageUsers" class="page">
+        <section id="portalUsersPanel" class="panel hidden">
+          <h2>终端用户管理</h2>
+          <p class="panel-desc">支持查看用户注册位置、启用状态、剩余次数，并手动增减打码次数。</p>
+          <div class="actions"><button id="refreshUsersBtn" class="secondary">刷新用户</button></div>
+          <div class="table-wrap"><table><thead><tr><th>ID</th><th>用户名</th><th>显示名</th><th>注册位置</th><th>启用</th><th>剩余次数</th><th>已用次数</th><th>最后登录</th><th>调次</th><th>操作</th></tr></thead><tbody id="portalUsersTable"></tbody></table></div>
+        </section>
+      </div>
+
+      <div id="pageCdks" class="page">
+        <section id="portalCdksPanel" class="panel hidden">
+          <h2>CDK 批量生成与管理</h2>
+          <p class="panel-desc">每个 CDK 可自定义兑换次数；终端用户兑换后增加对应剩余打码次数。</p>
+          <div class="grid">
+            <div class="field"><label>批量数量</label><input id="cdkBatchCount" type="number" min="1" max="500" value="10" /></div>
+            <div class="field"><label>每个 CDK 次数</label><input id="cdkQuotaTimes" type="number" min="1" value="10" /></div>
+            <div class="field"><label>前缀</label><input id="cdkPrefix" value="CDK" /></div>
+            <div class="field"><label>备注</label><input id="cdkNote" placeholder="例如：三月活动批次" /></div>
+          </div>
+          <div class="actions"><button id="createCdksBtn">批量生成 CDK</button><button id="refreshCdksBtn" class="secondary">刷新 CDK 列表</button></div>
+          <div id="newCdksText" class="panel-desc"></div>
+          <div class="table-wrap"><table><thead><tr><th>ID</th><th>CDK</th><th>次数</th><th>前缀</th><th>备注</th><th>启用</th><th>兑换用户</th><th>兑换时间</th><th>创建时间</th><th>操作</th></tr></thead><tbody id="portalCdksTable"></tbody></table></div>
+        </section>
+      </div>
+
       <div id="pageLogs" class="page">
         <section class="panel">
           <h2>调用日志（最近 30 条）</h2>
@@ -756,12 +802,14 @@
       const toInt = (v, d) => Number.isFinite(Number(v)) ? Math.floor(Number(v)) : d;
       const toFloat = (v, d) => Number.isFinite(Number(v)) ? Number(v) : d;
       const esc = (v) => String(v ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-      const pageNames = ["overview", "config", "cluster", "apikeys", "logs"];
+      const pageNames = ["overview", "config", "cluster", "apikeys", "users", "cdks", "logs"];
       const pageElementMap = {
         overview: "pageOverview",
         config: "pageConfig",
         cluster: "pageCluster",
         apikeys: "pageApiKeys",
+        users: "pageUsers",
+        cdks: "pageCdks",
         logs: "pageLogs",
       };
 
@@ -804,8 +852,10 @@
         const isMaster = state.role === "master";
         q("navCluster").classList.toggle("hidden", !isMaster);
         q("navApiKeys").classList.toggle("hidden", !isMaster);
+        q("navUsers").classList.toggle("hidden", !isMaster);
+        q("navCdks").classList.toggle("hidden", !isMaster);
         q("clusterStatsHint").classList.toggle("hidden", !isMaster);
-        if (!isMaster && (state.page === "cluster" || state.page === "apikeys")) {
+        if (!isMaster && ["cluster", "apikeys", "users", "cdks"].includes(state.page)) {
           setActivePage("overview");
         }
       };
@@ -840,6 +890,8 @@
         q("subnodeConfigPanel").classList.toggle("hidden", !isSubnode);
         q("masterClusterPanel").classList.toggle("hidden", !isMaster);
         q("masterApiKeyPanel").classList.toggle("hidden", !isMaster);
+        q("portalUsersPanel").classList.toggle("hidden", !isMaster);
+        q("portalCdksPanel").classList.toggle("hidden", !isMaster);
         refreshNavByRole();
       };
 
@@ -1003,6 +1055,26 @@
         for (const it of (r.items || [])) {
           const tr = document.createElement("tr");
           tr.innerHTML = `<td>${it.id}</td><td><input data-ak-id="${it.id}" data-ak-key="name" value="${it.name || ""}" /></td><td>${it.key_prefix || "-"}</td><td><input type="checkbox" data-ak-id="${it.id}" data-ak-key="enabled" ${it.enabled ? "checked" : ""} /></td><td><input data-ak-id="${it.id}" data-ak-key="quota_remaining" value="${it.quota_remaining ?? ""}" /></td><td>${it.quota_used ?? 0}</td><td><button class="secondary" data-action="save-api-key" data-id="${it.id}">保存</button></td>`;
+          b.appendChild(tr);
+        }
+      };
+      const loadPortalUsers = async () => {
+        if (state.role !== "master") return;
+        const r = await req("/api/admin/users");
+        const b = q("portalUsersTable"); b.innerHTML = "";
+        for (const it of (r.items || [])) {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `<td>${it.id}</td><td>${esc(it.username || "-")}</td><td><input data-user-id="${it.id}" data-user-key="display_name" value="${esc(it.display_name || "")}" /></td><td>${esc(it.register_location || "-")}</td><td><input type="checkbox" data-user-id="${it.id}" data-user-key="enabled" ${it.enabled ? "checked" : ""} /></td><td>${it.quota_remaining ?? 0}</td><td>${it.quota_used ?? 0}</td><td>${it.last_login_at || "-"}</td><td><input data-user-id="${it.id}" data-user-key="quota_remaining_delta" value="0" /></td><td><button class="secondary" data-action="save-user" data-id="${it.id}">保存</button></td>`;
+          b.appendChild(tr);
+        }
+      };
+      const loadPortalCdks = async () => {
+        if (state.role !== "master") return;
+        const r = await req("/api/admin/cdks");
+        const b = q("portalCdksTable"); b.innerHTML = "";
+        for (const it of (r.items || [])) {
+          const tr = document.createElement("tr");
+          tr.innerHTML = `<td>${it.id}</td><td>${esc(it.code || "-")}</td><td>${it.quota_times ?? 0}</td><td>${esc(it.batch_prefix || "-")}</td><td>${esc(it.note || "")}</td><td><input type="checkbox" data-cdk-id="${it.id}" data-cdk-key="enabled" ${it.enabled ? "checked" : ""} /></td><td>${esc(it.redeemed_username || "-")}</td><td>${it.redeemed_at || "-"}</td><td>${it.created_at || "-"}</td><td><button class="secondary" data-action="save-cdk" data-id="${it.id}">保存</button></td>`;
           b.appendChild(tr);
         }
       };
@@ -1208,6 +1280,8 @@
         await loadRuntime();
         await loadLogs();
         await loadApiKeys();
+        await loadPortalUsers();
+        await loadPortalCdks();
         await loadClusterNodes();
       };
       q("loginBtn").addEventListener("click", async () => {
@@ -1291,7 +1365,7 @@
           state.role = r.role || roleOfForm();
           fillSystemConfig(r.config || {}); renderGuide(r.setup_guide || null); setEnvNotice(r.env_overrides || {});
           showNotice(r.restart_required ? `${r.message || "系统配置已保存"}；建议现在重启服务。` : (r.message || "系统配置已保存。"), r.restart_required ? "warn" : "ok");
-          await loadClusterConfig(); await loadStats(); if (state.role !== "master") await loadRuntime(); if (state.role === "master") { await loadApiKeys(); await loadClusterNodes(); }
+          await loadClusterConfig(); await loadStats(); if (state.role !== "master") await loadRuntime(); if (state.role === "master") { await loadApiKeys(); await loadPortalUsers(); await loadPortalCdks(); await loadClusterNodes(); }
         } catch (err) { showNotice(`保存系统配置失败：${err.message}`, "err"); }
       });
 
@@ -1311,6 +1385,8 @@
       });
       q("refreshNodesBtn").addEventListener("click", async () => { try { await loadClusterNodes(); showNotice("子节点列表已刷新。", "ok"); } catch (err) { showNotice(`刷新子节点失败：${err.message}`, "err"); } });
       q("refreshApiKeyBtn").addEventListener("click", async () => { try { await loadApiKeys(); showNotice("API Key 列表已刷新。", "ok"); } catch (err) { showNotice(`刷新 API Key 失败：${err.message}`, "err"); } });
+      q("refreshUsersBtn").addEventListener("click", async () => { try { await loadPortalUsers(); showNotice("用户列表已刷新。", "ok"); } catch (err) { showNotice(`刷新用户失败：${err.message}`, "err"); } });
+      q("refreshCdksBtn").addEventListener("click", async () => { try { await loadPortalCdks(); showNotice("CDK 列表已刷新。", "ok"); } catch (err) { showNotice(`刷新 CDK 失败：${err.message}`, "err"); } });
 
       q("createApiKeyBtn").addEventListener("click", async () => {
         try {
@@ -1323,6 +1399,19 @@
           await loadApiKeys(); await loadSystem();
           showNotice("API Key 创建成功。", "ok");
         } catch (err) { showNotice(`创建 API Key 失败：${err.message}`, "err"); }
+      });
+
+      q("createCdksBtn").addEventListener("click", async () => {
+        try {
+          const count = toInt(q("cdkBatchCount").value, 10);
+          const quotaTimes = toInt(q("cdkQuotaTimes").value, 1);
+          const prefix = q("cdkPrefix").value.trim() || "CDK";
+          const note = q("cdkNote").value.trim() || null;
+          const r = await req("/api/admin/cdks/batch", { method: "POST", body: { count, quota_times: quotaTimes, prefix, note } });
+          q("newCdksText").textContent = (r.items || []).map((it) => `${it.code} (${it.quota_times})`).join("\n");
+          await loadPortalCdks();
+          showNotice(r.message || "CDK 已生成。", "ok");
+        } catch (err) { showNotice(`生成 CDK 失败：${err.message}`, "err"); }
       });
 
       document.addEventListener("click", async (event) => {
@@ -1357,6 +1446,67 @@
             await req(`/api/admin/cluster/nodes/${id}`, { method: "PATCH", body: { enabled: !!enabledEl?.checked, weight: toInt(weightEl?.value, 100) } });
             await loadClusterNodes(); showNotice(`子节点 #${id} 已保存。`, "ok");
           } catch (err) { showNotice(`保存子节点失败：${err.message}`, "err"); }
+        }
+
+        if (target.dataset.action === "save-user") {
+          const id = Number(target.dataset.id);
+          try {
+            const displayNameEl = document.querySelector(`input[data-user-id="${id}"][data-user-key="display_name"]`);
+            const enabledEl = document.querySelector(`input[data-user-id="${id}"][data-user-key="enabled"]`);
+            const deltaEl = document.querySelector(`input[data-user-id="${id}"][data-user-key="quota_remaining_delta"]`);
+            await req(`/api/admin/users/${id}`, {
+              method: "PATCH",
+              body: {
+                display_name: String(displayNameEl?.value || "").trim() || null,
+                enabled: !!enabledEl?.checked,
+                quota_remaining_delta: toInt(deltaEl?.value, 0),
+              },
+            });
+            await loadPortalUsers();
+            await loadStats();
+            showNotice(`用户 #${id} 已保存。`, "ok");
+          } catch (err) {
+            showNotice(`保存用户失败：${err.message}`, "err");
+          }
+        }
+
+        if (target.dataset.action === "save-cdk") {
+          const id = Number(target.dataset.id);
+          try {
+            const enabledEl = document.querySelector(`input[data-cdk-id="${id}"][data-cdk-key="enabled"]`);
+            await req(`/api/admin/cdks/${id}`, { method: "PATCH", body: { enabled: !!enabledEl?.checked } });
+            await loadPortalCdks();
+            showNotice(`CDK #${id} ????`, "ok");
+          } catch (err) {
+            showNotice(`?? CDK ???${err.message}`, "err");
+          }
+        }
+
+        if (target.dataset.action === "delete-user") {
+          const id = Number(target.dataset.id);
+          const ok = window.confirm(`??????? #${id} ?????????????????????`);
+          if (!ok) return;
+          try {
+            await req(`/api/admin/users/${id}`, { method: "DELETE" });
+            await loadPortalUsers();
+            await loadStats();
+            showNotice(`?? #${id} ?????`, "ok");
+          } catch (err) {
+            showNotice(`????????${err.message}`, "err");
+          }
+        }
+
+        if (target.dataset.action === "delete-cdk") {
+          const id = Number(target.dataset.id);
+          const ok = window.confirm(`????? CDK #${id} ??????? CDK ????????????`);
+          if (!ok) return;
+          try {
+            await req(`/api/admin/cdks/${id}`, { method: "DELETE" });
+            await loadPortalCdks();
+            showNotice(`CDK #${id} ?????`, "ok");
+          } catch (err) {
+            showNotice(`??? CDK ???${err.message}`, "err");
+          }
         }
 
         if (target.dataset.action === "delete-node") {

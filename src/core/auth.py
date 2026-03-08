@@ -1,9 +1,9 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import secrets
 from typing import Optional
 
-from fastapi import Header, HTTPException
+from fastapi import Cookie, Header, HTTPException
 
 from .config import config
 from .database import Database
@@ -11,6 +11,7 @@ from .database import Database
 
 _db: Optional[Database] = None
 _active_admin_tokens: set[str] = set()
+_active_portal_user_tokens: dict[str, int] = {}
 
 
 def set_database(db: Database):
@@ -63,6 +64,54 @@ def issue_admin_token() -> str:
 
 def revoke_admin_token(token: str):
     _active_admin_tokens.discard(token)
+
+
+def issue_portal_user_token(user_id: int) -> str:
+    token = f"portal_{secrets.token_urlsafe(24)}"
+    _active_portal_user_tokens[token] = int(user_id)
+    return token
+
+
+def revoke_portal_user_token(token: str):
+    _active_portal_user_tokens.pop(token, None)
+
+
+def revoke_portal_user_tokens_by_user_id(user_id: int):
+    target = int(user_id)
+    stale_tokens = [token for token, uid in _active_portal_user_tokens.items() if int(uid) == target]
+    for token in stale_tokens:
+        _active_portal_user_tokens.pop(token, None)
+
+
+async def verify_portal_user_token(
+    authorization: Optional[str] = Header(default=None),
+    portal_session: Optional[str] = Cookie(default=None),
+) -> dict:
+    if _db is None:
+        raise HTTPException(status_code=500, detail="数据库未初始化")
+
+    token = ""
+    if authorization:
+        token = _extract_bearer(authorization)
+    elif portal_session:
+        token = str(portal_session).strip()
+
+    if not token:
+        raise HTTPException(status_code=401, detail="用户会话无效或已过期")
+
+    user_id = _active_portal_user_tokens.get(token)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="用户会话无效或已过期")
+
+    user = await _db.get_portal_user(int(user_id))
+    if not user:
+        _active_portal_user_tokens.pop(token, None)
+        raise HTTPException(status_code=401, detail="用户不存在或已被删除")
+    if not bool(user.get("enabled", True)):
+        raise HTTPException(status_code=403, detail="用户已禁用")
+
+    user["token"] = token
+    return user
 
 
 async def verify_admin_token(authorization: Optional[str] = Header(default=None)) -> str:

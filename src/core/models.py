@@ -64,6 +64,35 @@ class LoginRequest(BaseModel):
     password: str
 
 
+class PortalRegisterRequest(BaseModel):
+    username: str = Field(min_length=3, max_length=60)
+    password: str = Field(min_length=6, max_length=120)
+    register_location: str = Field(min_length=1, max_length=120)
+    display_name: Optional[str] = Field(default=None, min_length=1, max_length=120)
+
+
+class PortalRedeemRequest(BaseModel):
+    code: str = Field(min_length=1, max_length=120)
+
+
+class PortalUserUpdateRequest(BaseModel):
+    enabled: Optional[bool] = None
+    display_name: Optional[str] = Field(default=None, min_length=1, max_length=120)
+    quota_remaining_delta: Optional[int] = None
+    new_password: Optional[str] = Field(default=None, min_length=6, max_length=120)
+
+
+class PortalCdkBatchCreateRequest(BaseModel):
+    count: int = Field(default=10, ge=1, le=500)
+    quota_times: int = Field(default=1, ge=1, le=100000)
+    prefix: Optional[str] = Field(default="CDK", max_length=20)
+    note: Optional[str] = Field(default=None, max_length=200)
+
+
+class UpdateCdkRequest(BaseModel):
+    enabled: Optional[bool] = None
+
+
 class CreateApiKeyRequest(BaseModel):
     name: str = Field(min_length=1, max_length=100)
     quota_remaining: Optional[int] = Field(default=None, ge=0)

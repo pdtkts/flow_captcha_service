@@ -14,6 +14,7 @@
 - 不接 yescaptcha/capsolver 等外部平台
 - 支持会话化流程：`solve -> finish/error`
 - 支持 `standalone / master / subnode` 三种角色
+- 支持独立用户门户（`/`）做接入说明、在线调试、自助日志查询
 - 支持管理面板（`/admin`）做常用运维操作
 - 支持 API Key、额度、日志、集群节点状态管理
 
@@ -305,6 +306,7 @@ python main.py
 
 访问：
 
+- 用户门户：`http://127.0.0.1:8060/`
 - 服务健康检查：`http://127.0.0.1:8060/api/v1/health`
 - 管理面板：`http://127.0.0.1:8060/admin`
 

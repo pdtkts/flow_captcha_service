@@ -25,6 +25,11 @@ class Database:
     def _generate_cluster_key() -> str:
         return f"fcs_cluster_{secrets.token_urlsafe(24)}"
 
+    @staticmethod
+    def _generate_service_api_key() -> tuple[str, str, str]:
+        raw_key = f"fcs_{secrets.token_urlsafe(32)}"
+        return raw_key, Database._hash_secret(raw_key), raw_key[:12]
+
     async def init_db(self):
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
@@ -73,6 +78,41 @@ class Database:
 
             await db.execute(
                 """
+                CREATE TABLE IF NOT EXISTS portal_users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT NOT NULL UNIQUE,
+                    display_name TEXT,
+                    password_hash TEXT NOT NULL,
+                    register_location TEXT NOT NULL,
+                    enabled BOOLEAN DEFAULT 1,
+                    quota_remaining INTEGER DEFAULT 0,
+                    quota_used INTEGER DEFAULT 0,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    last_login_at TIMESTAMP
+                )
+                """
+            )
+
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS portal_cdks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    code TEXT NOT NULL UNIQUE,
+                    quota_times INTEGER NOT NULL,
+                    batch_prefix TEXT,
+                    note TEXT,
+                    enabled BOOLEAN DEFAULT 1,
+                    redeemed_user_id INTEGER,
+                    redeemed_at TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(redeemed_user_id) REFERENCES portal_users(id)
+                )
+                """
+            )
+
+            await db.execute(
+                """
                 CREATE TABLE IF NOT EXISTS captcha_jobs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     session_id TEXT,
@@ -84,6 +124,23 @@ class Database:
                     duration_ms INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY(api_key_id) REFERENCES service_api_keys(id)
+                )
+                """
+            )
+
+            await db.execute(
+                """
+                CREATE TABLE IF NOT EXISTS portal_user_jobs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    portal_user_id INTEGER NOT NULL,
+                    session_id TEXT,
+                    project_id TEXT,
+                    action TEXT,
+                    status TEXT,
+                    error_reason TEXT,
+                    duration_ms INTEGER,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY(portal_user_id) REFERENCES portal_users(id)
                 )
                 """
             )
@@ -153,6 +210,13 @@ class Database:
 
             await db.execute("CREATE INDEX IF NOT EXISTS idx_captcha_jobs_created_at ON captcha_jobs(created_at DESC)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_captcha_jobs_status ON captcha_jobs(status)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_captcha_jobs_api_key_created ON captcha_jobs(api_key_id, created_at DESC)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_portal_users_enabled ON portal_users(enabled)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_portal_users_last_login ON portal_users(last_login_at DESC)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_portal_cdks_enabled ON portal_cdks(enabled)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_portal_cdks_redeemed_user_id ON portal_cdks(redeemed_user_id)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_portal_user_jobs_user_created ON portal_user_jobs(portal_user_id, created_at DESC)")
+            await db.execute("CREATE INDEX IF NOT EXISTS idx_portal_user_jobs_status ON portal_user_jobs(status)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_service_api_keys_enabled ON service_api_keys(enabled)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_cluster_nodes_enabled ON cluster_nodes(enabled)")
             await db.execute("CREATE INDEX IF NOT EXISTS idx_cluster_nodes_heartbeat ON cluster_nodes(last_heartbeat_at DESC)")
@@ -353,6 +417,465 @@ class Database:
 
         profile = await self.get_admin_profile()
         return True, "管理员账号更新成功", profile
+
+    async def get_portal_user(self, user_id: int) -> Optional[Dict[str, Any]]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT id, username, display_name, register_location, enabled,
+                       quota_remaining, quota_used, created_at, updated_at, last_login_at
+                FROM portal_users
+                WHERE id = ?
+                """,
+                (user_id,),
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def get_portal_user_by_username(self, username: str) -> Optional[Dict[str, Any]]:
+        normalized = str(username or "").strip()
+        if not normalized:
+            return None
+
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT id, username, display_name, register_location, enabled,
+                       quota_remaining, quota_used, created_at, updated_at, last_login_at,
+                       password_hash
+                FROM portal_users
+                WHERE username = ?
+                """,
+                (normalized,),
+            )
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+    async def create_portal_user(
+        self,
+        username: str,
+        password: str,
+        register_location: str,
+        display_name: Optional[str] = None,
+    ) -> tuple[bool, str, Optional[Dict[str, Any]]]:
+        normalized_username = str(username or "").strip()
+        normalized_location = str(register_location or "").strip()
+        normalized_display_name = str(display_name or normalized_username).strip() or normalized_username
+        if not normalized_username:
+            return False, "用户名不能为空", None
+        if not normalized_location:
+            return False, "注册位置不能为空", None
+        existing = await self.get_portal_user_by_username(normalized_username)
+        if existing:
+            return False, "该用户名已经注册", None
+
+        async with aiosqlite.connect(self.db_path) as db:
+            cursor = await db.execute(
+                """
+                INSERT INTO portal_users (username, display_name, password_hash, register_location, enabled, quota_remaining, quota_used)
+                VALUES (?, ?, ?, ?, 1, 0, 0)
+                """,
+                (normalized_username, normalized_display_name, self._hash_secret(password), normalized_location),
+            )
+            user_id = int(cursor.lastrowid or 0)
+            await db.commit()
+
+        return True, "注册成功", await self.get_portal_user(user_id)
+
+    async def verify_portal_user_credentials(self, username: str, password: str) -> Optional[Dict[str, Any]]:
+        user = await self.get_portal_user_by_username(username)
+        if not user:
+            return None
+        if user.get("password_hash") != self._hash_secret(password):
+            return None
+        return await self.get_portal_user(int(user["id"]))
+
+    async def mark_portal_user_login(self, user_id: int):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE portal_users SET last_login_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (user_id,),
+            )
+            await db.commit()
+
+    async def list_portal_users(self) -> List[Dict[str, Any]]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT id, username, display_name, register_location, enabled,
+                       quota_remaining, quota_used, created_at, updated_at, last_login_at
+                FROM portal_users
+                ORDER BY id DESC
+                """
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def update_portal_user(
+        self,
+        user_id: int,
+        enabled: Optional[bool] = None,
+        display_name: Optional[str] = None,
+        quota_remaining_delta: Optional[int] = None,
+        new_password: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        current = await self.get_portal_user(user_id)
+        if not current:
+            return None
+
+        new_enabled = int(bool(enabled)) if enabled is not None else int(bool(current["enabled"]))
+        new_display_name = str(display_name or current.get("display_name") or current.get("username") or "").strip()
+        delta = int(quota_remaining_delta or 0)
+        new_password_hash = self._hash_secret(new_password) if new_password else None
+
+        async with aiosqlite.connect(self.db_path) as db:
+            if new_password_hash:
+                await db.execute(
+                    """
+                    UPDATE portal_users
+                    SET enabled = ?,
+                        display_name = ?,
+                        quota_remaining = MAX(COALESCE(quota_remaining, 0) + ?, 0),
+                        password_hash = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (new_enabled, new_display_name, delta, new_password_hash, user_id),
+                )
+            else:
+                await db.execute(
+                    """
+                    UPDATE portal_users
+                    SET enabled = ?,
+                        display_name = ?,
+                        quota_remaining = MAX(COALESCE(quota_remaining, 0) + ?, 0),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (new_enabled, new_display_name, delta, user_id),
+                )
+            await db.commit()
+        return await self.get_portal_user(user_id)
+
+    async def ensure_portal_user_available(self, user_id: int) -> Tuple[bool, str]:
+        user = await self.get_portal_user(user_id)
+        if not user:
+            return False, "用户不存在"
+        if not bool(user.get("enabled")):
+            return False, "用户已禁用"
+        if int(user.get("quota_remaining") or 0) <= 0:
+            return False, "剩余次数不足"
+        return True, ""
+
+    async def consume_portal_user_quota(self, user_id: int) -> Tuple[bool, str]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute(
+                    "SELECT enabled, quota_remaining, quota_used FROM portal_users WHERE id = ?",
+                    (user_id,),
+                )
+                row = await cursor.fetchone()
+                if not row:
+                    await db.execute("ROLLBACK")
+                    return False, "用户不存在"
+                if not bool(row["enabled"]):
+                    await db.execute("ROLLBACK")
+                    return False, "用户已禁用"
+                if int(row["quota_remaining"] or 0) <= 0:
+                    await db.execute("ROLLBACK")
+                    return False, "剩余次数不足"
+
+                await db.execute(
+                    """
+                    UPDATE portal_users
+                    SET quota_remaining = quota_remaining - 1,
+                        quota_used = quota_used + 1,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ? AND quota_remaining > 0
+                    """,
+                    (user_id,),
+                )
+                await db.commit()
+                return True, ""
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
+
+    async def create_portal_user_job_log(
+        self,
+        portal_user_id: int,
+        session_id: Optional[str],
+        project_id: Optional[str],
+        action: Optional[str],
+        status: str,
+        error_reason: Optional[str],
+        duration_ms: Optional[int],
+    ):
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                """
+                INSERT INTO portal_user_jobs (portal_user_id, session_id, project_id, action, status, error_reason, duration_ms)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (portal_user_id, session_id, project_id, action, status, error_reason, duration_ms),
+            )
+            await db.commit()
+
+    async def list_portal_user_jobs(
+        self,
+        portal_user_id: int,
+        limit: int = 20,
+        offset: int = 0,
+        status: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 200))
+        safe_offset = max(0, int(offset))
+        conditions = ["portal_user_id = ?"]
+        params: List[Any] = [portal_user_id]
+
+        if str(status or "").strip():
+            conditions.append("status = ?")
+            params.append(str(status).strip())
+        if str(project_id or "").strip():
+            conditions.append("project_id = ?")
+            params.append(str(project_id).strip())
+
+        params.extend([safe_limit, safe_offset])
+        where_sql = " AND ".join(conditions)
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                f"""
+                SELECT id, portal_user_id, session_id, project_id, action, status, error_reason, duration_ms, created_at
+                FROM portal_user_jobs
+                WHERE {where_sql}
+                ORDER BY id DESC
+                LIMIT ? OFFSET ?
+                """,
+                params,
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def get_portal_user_usage_summary(self, user_id: int) -> Optional[Dict[str, Any]]:
+        user = await self.get_portal_user(user_id)
+        if not user:
+            return None
+
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT
+                    COUNT(*) AS request_total,
+                    SUM(CASE WHEN status IN ('success', 'success_master_dispatch') THEN 1 ELSE 0 END) AS solve_success_total,
+                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS solve_failed_total,
+                    SUM(CASE WHEN status LIKE 'finish:%' THEN 1 ELSE 0 END) AS finish_total,
+                    SUM(CASE WHEN status = 'error_reported' THEN 1 ELSE 0 END) AS error_total,
+                    SUM(CASE WHEN created_at >= datetime('now', '-24 hours') THEN 1 ELSE 0 END) AS recent_24h_total,
+                    SUM(CASE WHEN created_at >= datetime('now', '-7 days') THEN 1 ELSE 0 END) AS recent_7d_total,
+                    AVG(CASE WHEN duration_ms IS NOT NULL THEN duration_ms END) AS avg_duration_ms,
+                    MAX(created_at) AS last_request_at
+                FROM portal_user_jobs
+                WHERE portal_user_id = ?
+                """,
+                (user_id,),
+            )
+            summary = await cursor.fetchone()
+
+            cursor = await db.execute(
+                """
+                SELECT project_id, COUNT(*) AS total
+                FROM portal_user_jobs
+                WHERE portal_user_id = ? AND project_id IS NOT NULL AND project_id <> ''
+                GROUP BY project_id
+                ORDER BY total DESC, project_id ASC
+                LIMIT 5
+                """,
+                (user_id,),
+            )
+            top_projects = [dict(row) for row in await cursor.fetchall()]
+
+            cursor = await db.execute(
+                """
+                SELECT session_id
+                FROM portal_user_jobs
+                WHERE portal_user_id = ? AND session_id IS NOT NULL AND session_id <> ''
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (user_id,),
+            )
+            latest_session = await cursor.fetchone()
+
+        solve_success_total = int(summary["solve_success_total"] or 0)
+        solve_failed_total = int(summary["solve_failed_total"] or 0)
+        solve_total = solve_success_total + solve_failed_total
+        return {
+            "user": user,
+            "usage": {
+                "request_total": int(summary["request_total"] or 0),
+                "solve_success_total": solve_success_total,
+                "solve_failed_total": solve_failed_total,
+                "solve_total": solve_total,
+                "finish_total": int(summary["finish_total"] or 0),
+                "error_total": int(summary["error_total"] or 0),
+                "recent_24h_total": int(summary["recent_24h_total"] or 0),
+                "recent_7d_total": int(summary["recent_7d_total"] or 0),
+                "avg_duration_ms": int(float(summary["avg_duration_ms"] or 0)) if summary["avg_duration_ms"] is not None else None,
+                "last_request_at": summary["last_request_at"],
+                "latest_session_id": latest_session["session_id"] if latest_session else None,
+                "success_rate": round((solve_success_total / solve_total) * 100, 2) if solve_total > 0 else 0.0,
+                "top_projects": top_projects,
+            },
+        }
+
+    async def create_portal_cdks_batch(
+        self,
+        count: int,
+        quota_times: int,
+        prefix: Optional[str] = None,
+        note: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        safe_count = max(1, min(int(count), 500))
+        safe_quota = max(1, int(quota_times))
+        normalized_prefix = str(prefix or "CDK").strip().upper()[:20] or "CDK"
+        normalized_note = str(note or "").strip()[:200] or None
+
+        created: List[Dict[str, Any]] = []
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            for _ in range(safe_count):
+                while True:
+                    code = f"{normalized_prefix}-{secrets.token_urlsafe(8).replace('-', '').replace('_', '').upper()[:10]}"
+                    cursor = await db.execute("SELECT id FROM portal_cdks WHERE code = ?", (code,))
+                    if not await cursor.fetchone():
+                        break
+                cursor = await db.execute(
+                    """
+                    INSERT INTO portal_cdks (code, quota_times, batch_prefix, note, enabled)
+                    VALUES (?, ?, ?, ?, 1)
+                    """,
+                    (code, safe_quota, normalized_prefix, normalized_note),
+                )
+                created.append(
+                    {
+                        "id": int(cursor.lastrowid or 0),
+                        "code": code,
+                        "quota_times": safe_quota,
+                        "batch_prefix": normalized_prefix,
+                        "note": normalized_note,
+                        "enabled": True,
+                    }
+                )
+            await db.commit()
+        return created
+
+    async def list_portal_cdks(self, limit: int = 500) -> List[Dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 1000))
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT c.id, c.code, c.quota_times, c.batch_prefix, c.note, c.enabled,
+                       c.redeemed_user_id, u.username AS redeemed_username, c.redeemed_at, c.created_at
+                FROM portal_cdks c
+                LEFT JOIN portal_users u ON u.id = c.redeemed_user_id
+                ORDER BY c.id DESC
+                LIMIT ?
+                """,
+                (safe_limit,),
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def update_portal_cdk(self, cdk_id: int, enabled: Optional[bool] = None) -> Optional[Dict[str, Any]]:
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute("SELECT * FROM portal_cdks WHERE id = ?", (cdk_id,))
+            current = await cursor.fetchone()
+            if not current:
+                return None
+            new_enabled = int(bool(enabled)) if enabled is not None else int(bool(current["enabled"]))
+            await db.execute(
+                "UPDATE portal_cdks SET enabled = ? WHERE id = ?",
+                (new_enabled, cdk_id),
+            )
+            await db.commit()
+
+        items = await self.list_portal_cdks(limit=1000)
+        return next((item for item in items if int(item.get("id") or 0) == int(cdk_id)), None)
+
+    async def list_portal_user_cdk_redeems(self, user_id: int, limit: int = 20) -> List[Dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 100))
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                """
+                SELECT c.id, c.code, c.quota_times, c.batch_prefix, c.note, c.redeemed_at, c.created_at
+                FROM portal_cdks c
+                WHERE c.redeemed_user_id = ?
+                ORDER BY c.redeemed_at DESC, c.id DESC
+                LIMIT ?
+                """,
+                (user_id, safe_limit),
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+    async def redeem_portal_cdk(self, user_id: int, code: str) -> tuple[bool, str, Optional[Dict[str, Any]]]:
+        normalized_code = str(code or "").strip().upper()
+        if not normalized_code:
+            return False, "兑换码不能为空", None
+
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute("SELECT * FROM portal_cdks WHERE code = ?", (normalized_code,))
+                cdk = await cursor.fetchone()
+                if not cdk:
+                    await db.execute("ROLLBACK")
+                    return False, "兑换码不存在", None
+                if not bool(cdk["enabled"]):
+                    await db.execute("ROLLBACK")
+                    return False, "兑换码已禁用", None
+                if cdk["redeemed_user_id"] is not None:
+                    await db.execute("ROLLBACK")
+                    return False, "兑换码已被使用", None
+
+                cursor = await db.execute("SELECT enabled FROM portal_users WHERE id = ?", (user_id,))
+                user = await cursor.fetchone()
+                if not user:
+                    await db.execute("ROLLBACK")
+                    return False, "用户不存在", None
+                if not bool(user["enabled"]):
+                    await db.execute("ROLLBACK")
+                    return False, "用户已禁用", None
+
+                await db.execute(
+                    "UPDATE portal_users SET quota_remaining = quota_remaining + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (int(cdk["quota_times"] or 0), user_id),
+                )
+                await db.execute(
+                    "UPDATE portal_cdks SET redeemed_user_id = ?, redeemed_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (user_id, int(cdk["id"])),
+                )
+                await db.commit()
+            except Exception:
+                await db.execute("ROLLBACK")
+                raise
+
+        updated_user = await self.get_portal_user(user_id)
+        cdks = await self.list_portal_cdks(limit=1000)
+        redeemed = next((item for item in cdks if str(item.get("code") or "") == normalized_code), None)
+        return True, "兑换成功", {"user": updated_user, "cdk": redeemed}
 
     async def get_captcha_config(self) -> CaptchaConfig:
         async with aiosqlite.connect(self.db_path) as db:
@@ -596,6 +1119,146 @@ class Database:
             rows = await cursor.fetchall()
             return [dict(row) for row in rows]
 
+
+    async def list_job_logs_by_api_key(
+        self,
+        api_key_id: int,
+        limit: int = 100,
+        offset: int = 0,
+        status: Optional[str] = None,
+        project_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        safe_limit = max(1, min(int(limit), 200))
+        safe_offset = max(0, int(offset))
+
+        conditions = ["j.api_key_id = ?"]
+        params: list[Any] = [api_key_id]
+
+        normalized_status = str(status or "").strip()
+        if normalized_status:
+            conditions.append("j.status = ?")
+            params.append(normalized_status)
+
+        normalized_project = str(project_id or "").strip()
+        if normalized_project:
+            conditions.append("j.project_id = ?")
+            params.append(normalized_project)
+
+        where_sql = " AND ".join(conditions)
+        params.extend([safe_limit, safe_offset])
+
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                f"""
+                SELECT j.id, j.session_id, j.api_key_id, k.name AS api_key_name, k.key_prefix,
+                       j.project_id, j.action, j.status, j.error_reason, j.duration_ms, j.created_at
+                FROM captcha_jobs j
+                LEFT JOIN service_api_keys k ON k.id = j.api_key_id
+                WHERE {where_sql}
+                ORDER BY j.id DESC
+                LIMIT ? OFFSET ?
+                """,
+                params,
+            )
+            rows = await cursor.fetchall()
+            return [dict(row) for row in rows]
+
+
+    async def get_api_key_usage_summary(self, api_key_id: int) -> Optional[Dict[str, Any]]:
+        api_key = await self.get_api_key(api_key_id)
+        if not api_key:
+            return None
+
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+
+            cursor = await db.execute(
+                """
+                SELECT
+                    COUNT(*) AS request_total,
+                    SUM(CASE WHEN status IN ('success', 'success_master_dispatch') THEN 1 ELSE 0 END) AS solve_success_total,
+                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS solve_failed_total,
+                    SUM(CASE WHEN status LIKE 'finish:%' THEN 1 ELSE 0 END) AS finish_total,
+                    SUM(CASE WHEN status = 'error_reported' THEN 1 ELSE 0 END) AS error_total,
+                    SUM(CASE WHEN created_at >= datetime('now', '-24 hours') THEN 1 ELSE 0 END) AS recent_24h_total,
+                    SUM(CASE WHEN created_at >= datetime('now', '-7 days') THEN 1 ELSE 0 END) AS recent_7d_total,
+                    AVG(CASE WHEN duration_ms IS NOT NULL THEN duration_ms END) AS avg_duration_ms,
+                    MAX(created_at) AS last_request_at
+                FROM captcha_jobs
+                WHERE api_key_id = ?
+                """,
+                (api_key_id,),
+            )
+            summary = await cursor.fetchone()
+
+            cursor = await db.execute(
+                """
+                SELECT session_id
+                FROM captcha_jobs
+                WHERE api_key_id = ? AND session_id IS NOT NULL AND session_id <> ''
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (api_key_id,),
+            )
+            latest_session = await cursor.fetchone()
+
+            cursor = await db.execute(
+                """
+                SELECT project_id,
+                       COUNT(*) AS total,
+                       SUM(CASE WHEN status IN ('success', 'success_master_dispatch') THEN 1 ELSE 0 END) AS solve_success,
+                       SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS solve_failed,
+                       MAX(created_at) AS last_used_at
+                FROM captcha_jobs
+                WHERE api_key_id = ? AND project_id IS NOT NULL AND project_id <> ''
+                GROUP BY project_id
+                ORDER BY total DESC, project_id ASC
+                LIMIT 5
+                """,
+                (api_key_id,),
+            )
+            top_projects = [dict(row) for row in await cursor.fetchall()]
+
+            cursor = await db.execute(
+                """
+                SELECT action,
+                       COUNT(*) AS total
+                FROM captcha_jobs
+                WHERE api_key_id = ? AND action IS NOT NULL AND action <> ''
+                GROUP BY action
+                ORDER BY total DESC, action ASC
+                LIMIT 5
+                """,
+                (api_key_id,),
+            )
+            top_actions = [dict(row) for row in await cursor.fetchall()]
+
+        solve_success_total = int(summary["solve_success_total"] or 0)
+        solve_failed_total = int(summary["solve_failed_total"] or 0)
+        solve_total = solve_success_total + solve_failed_total
+
+        return {
+            "api_key": api_key,
+            "usage": {
+                "request_total": int(summary["request_total"] or 0),
+                "solve_success_total": solve_success_total,
+                "solve_failed_total": solve_failed_total,
+                "solve_total": solve_total,
+                "finish_total": int(summary["finish_total"] or 0),
+                "error_total": int(summary["error_total"] or 0),
+                "recent_24h_total": int(summary["recent_24h_total"] or 0),
+                "recent_7d_total": int(summary["recent_7d_total"] or 0),
+                "avg_duration_ms": int(float(summary["avg_duration_ms"] or 0)) if summary["avg_duration_ms"] is not None else None,
+                "last_request_at": summary["last_request_at"],
+                "latest_session_id": latest_session["session_id"] if latest_session else None,
+                "success_rate": round((solve_success_total / solve_total) * 100, 2) if solve_total > 0 else 0.0,
+                "top_projects": top_projects,
+                "top_actions": top_actions,
+            },
+        }
+
     async def get_service_stats(self) -> Dict[str, Any]:
         async with aiosqlite.connect(self.db_path) as db:
             db.row_factory = aiosqlite.Row
@@ -604,8 +1267,10 @@ class Database:
                 """
                 SELECT
                     COUNT(*) AS total,
-                    SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success,
-                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed
+                    SUM(CASE WHEN status IN ('success', 'success_master_dispatch') THEN 1 ELSE 0 END) AS success,
+                    SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed,
+                    SUM(CASE WHEN status LIKE 'finish:%' THEN 1 ELSE 0 END) AS finish_total,
+                    SUM(CASE WHEN status = 'error_reported' THEN 1 ELSE 0 END) AS error_report_total
                 FROM captcha_jobs
                 """
             )
@@ -631,14 +1296,41 @@ class Database:
             )
             node_summary = await cursor.fetchone()
 
+            cursor = await db.execute(
+                """
+                SELECT
+                    COUNT(*) AS portal_user_total,
+                    SUM(CASE WHEN enabled = 1 THEN 1 ELSE 0 END) AS portal_user_enabled_total
+                FROM portal_users
+                """
+            )
+            portal_user_summary = await cursor.fetchone()
+
+            cursor = await db.execute(
+                """
+                SELECT
+                    COUNT(*) AS portal_cdk_total,
+                    SUM(CASE WHEN redeemed_user_id IS NULL THEN 1 ELSE 0 END) AS portal_cdk_unused_total
+                FROM portal_cdks
+                """
+            )
+            portal_cdk_summary = await cursor.fetchone()
+
             return {
                 "jobs_total": int(summary["total"] or 0),
                 "jobs_success": int(summary["success"] or 0),
                 "jobs_failed": int(summary["failed"] or 0),
+                "jobs_solve_total": int(summary["success"] or 0) + int(summary["failed"] or 0),
+                "jobs_finish_total": int(summary["finish_total"] or 0),
+                "jobs_error_report_total": int(summary["error_report_total"] or 0),
                 "api_key_total": int(key_summary["key_count"] or 0),
                 "api_key_enabled_total": int(key_summary["key_enabled_count"] or 0),
                 "cluster_node_total": int(node_summary["node_count"] or 0),
                 "cluster_node_enabled_total": int(node_summary["node_enabled_count"] or 0),
+                "portal_user_total": int(portal_user_summary["portal_user_total"] or 0),
+                "portal_user_enabled_total": int(portal_user_summary["portal_user_enabled_total"] or 0),
+                "portal_cdk_total": int(portal_cdk_summary["portal_cdk_total"] or 0),
+                "portal_cdk_unused_total": int(portal_cdk_summary["portal_cdk_unused_total"] or 0),
             }
 
     async def get_cluster_key(self) -> str:

@@ -1,0 +1,551 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>flow_captcha_service 用户门户</title>
+  <link rel="stylesheet" href="/static/portal.css" />
+</head>
+<body>
+  <main class="shell">
+    <section class="hero card-glass">
+      <div class="hero-row">
+        <div class="hero-copy">
+          <div class="eyebrow">M 主节点 · 用户账号工作台</div>
+          <h1>flow_captcha_service 用户门户</h1>
+          <p class="lead">
+            现在的主路径不再只是 API Key 调试页，而是完整的终端用户入口：
+            支持注册、登录、兑换 CDK、查看剩余次数，并优先使用用户态接口完成
+            solve / finish / error / custom-score。
+          </p>
+          <div class="hero-actions">
+            <a class="btn primary" href="#userCenter">用户中心</a>
+            <a class="btn ghost" href="#playground">开始联调</a>
+            <a class="btn subtle" href="/admin">进入管理员后台</a>
+            <button id="refreshSummaryBtn" class="btn subtle" type="button">刷新概览</button>
+          </div>
+        </div>
+
+        <div class="hero-status">
+          <div class="status-pill"><span class="dot live"></span><span id="serviceRoleChip">正在加载角色...</span></div>
+          <div class="status-pill"><span class="dot soft"></span><span id="serviceNodeChip">正在读取节点...</span></div>
+          <div class="status-pill"><span class="dot soft"></span><span id="serviceDispatchChip">正在评估容量...</span></div>
+          <div class="status-pill"><span class="dot soft"></span><span id="serviceModeChip">当前默认走用户态接口...</span></div>
+        </div>
+      </div>
+
+      <div class="hero-grid">
+        <article class="metric-card">
+          <div class="metric-k">当前角色</div>
+          <div id="metricRole" class="metric-v">--</div>
+          <div id="metricRoleNote" class="metric-s">--</div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-k">当前节点</div>
+          <div id="metricNode" class="metric-v">--</div>
+          <div class="metric-s">注册位置会按当前主节点门户进行校验</div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-k">可用派发容量</div>
+          <div id="metricCapacity" class="metric-v">--</div>
+          <div id="metricCapacityNote" class="metric-s">--</div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-k">运行中会话</div>
+          <div id="metricSessions" class="metric-v">--</div>
+          <div id="metricSessionsNote" class="metric-s">--</div>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <div>
+          <div class="section-eyebrow">功能清单</div>
+          <h2>这版用户端已切到“账号模式优先”</h2>
+        </div>
+        <p class="section-desc">管理员敏感操作仍留在 `/admin`，前台只保留用户能看、能用、能自助处理的能力。</p>
+      </div>
+      <div class="feature-grid">
+        <article class="feature-card">
+          <div class="feature-index">01</div>
+          <h3>终端用户注册 / 登录</h3>
+          <p>主路径新增账号体系，页面会明确显示注册位置、是否已注册、最后登录和当前状态。</p>
+        </article>
+        <article class="feature-card">
+          <div class="feature-index">02</div>
+          <h3>CDK 兑换与成功提示</h3>
+          <p>用户输入兑换码即可领取打码次数，兑换成功后会立即显示新增次数和最近兑换结果。</p>
+        </article>
+        <article class="feature-card">
+          <div class="feature-index">03</div>
+          <h3>次数余额与成功统计</h3>
+          <p>展示剩余次数、已用次数、成功次数、失败次数，并明确说明“失败不扣次”。</p>
+        </article>
+        <article class="feature-card">
+          <div class="feature-index">04</div>
+          <h3>用户态 Solve 调试</h3>
+          <p>主按钮优先调用 `/api/portal/user/*`，不再把 API Key 作为前台默认主入口。</p>
+        </article>
+        <article class="feature-card">
+          <div class="feature-index">05</div>
+          <h3>Session 工具箱</h3>
+          <p>继续支持 finish / error，会自动回填最近 session_id，方便用户闭环联调。</p>
+        </article>
+        <article class="feature-card">
+          <div class="feature-index">06</div>
+          <h3>高级兼容模式</h3>
+          <p>仍保留 API Key 连接方式，作为高级模式 / 兼容模式，不影响历史接入方。</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <div>
+          <div class="section-eyebrow">主节点只读看板</div>
+          <h2>公开可见的子节点容量摘要</h2>
+        </div>
+        <p id="clusterBoardNote" class="section-desc">用户端只展示安全摘要，不暴露管理员敏感配置。</p>
+      </div>
+
+      <div class="table-wrap card">
+        <table>
+          <thead>
+            <tr>
+              <th>节点</th>
+              <th>健康状态</th>
+              <th>总容量</th>
+              <th>活跃</th>
+              <th>空闲</th>
+              <th>会话</th>
+              <th>心跳延迟</th>
+              <th>说明</th>
+            </tr>
+          </thead>
+          <tbody id="clusterNodesBody">
+            <tr>
+              <td colspan="8" class="empty-cell">正在加载主节点容量摘要...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="userCenter" class="section split-layout">
+      <article class="panel card">
+        <div class="section-head compact">
+          <div>
+            <div class="section-eyebrow">终端用户账号区</div>
+            <h2>注册、登录与账号状态</h2>
+          </div>
+          <span id="playgroundModeBadge" class="tag">当前模式：访客</span>
+        </div>
+
+        <div id="accountNotice" class="notice info">请先注册或登录终端用户账号，主按钮将优先走用户态接口。</div>
+
+        <div class="tiny-grid account-grid">
+          <article class="tiny-card">
+            <div class="tiny-k">是否已注册</div>
+            <div id="accountRegisteredState" class="tiny-v">未注册</div>
+          </article>
+          <article class="tiny-card">
+            <div class="tiny-k">当前账号</div>
+            <div id="accountUsername" class="tiny-v">--</div>
+          </article>
+          <article class="tiny-card">
+            <div class="tiny-k">注册位置</div>
+            <div id="accountLocation" class="tiny-v">--</div>
+          </article>
+          <article class="tiny-card">
+            <div class="tiny-k">最后登录</div>
+            <div id="accountLastLogin" class="tiny-v small">--</div>
+          </article>
+        </div>
+
+        <div class="auth-grid">
+          <form id="loginForm" class="sub-card stack-form">
+            <div class="card-head">
+              <h3>用户登录</h3>
+              <span class="tag muted">主路径默认</span>
+            </div>
+            <label class="field"><span>用户名</span><input id="loginUsername" autocomplete="username" placeholder="请输入用户名" /></label>
+            <label class="field"><span>密码</span><input id="loginPassword" type="password" autocomplete="current-password" placeholder="请输入密码" /></label>
+            <div class="inline-actions">
+              <button class="btn primary" type="submit">登录账号</button>
+              <button id="logoutBtn" class="btn ghost" type="button">退出登录</button>
+            </div>
+          </form>
+
+          <form id="registerForm" class="sub-card stack-form">
+            <div class="card-head">
+              <h3>用户注册</h3>
+              <span class="tag">校验注册位置</span>
+            </div>
+            <label class="field"><span>用户名</span><input id="registerUsername" autocomplete="username" placeholder="创建一个用户名" /></label>
+            <label class="field"><span>密码</span><input id="registerPassword" type="password" autocomplete="new-password" placeholder="至少 6 位" /></label>
+            <label class="field">
+              <span>注册位置</span>
+              <select id="registerLocation">
+                <option value="master-portal">master-portal</option>
+                <option value="/portal">/portal</option>
+                <option value="/">/</option>
+              </select>
+            </label>
+            <p class="mini-hint">当前会默认校验是否从主节点门户注册；如果账号已存在，后端应返回“已注册”提示。</p>
+            <div class="inline-actions">
+              <button class="btn primary" type="submit">注册并登录</button>
+            </div>
+          </form>
+        </div>
+      </article>
+
+      <article class="panel card accent-panel">
+        <div class="section-head compact">
+          <div>
+            <div class="section-eyebrow">CDK 兑换区</div>
+            <h2>兑换码、剩余次数与成功提示</h2>
+          </div>
+        </div>
+
+        <form id="redeemForm" class="stack-form">
+          <label class="field"><span>兑换码 / CDK</span><input id="redeemCodeInput" placeholder="输入管理员发放的兑换码" autocomplete="off" /></label>
+          <div class="inline-actions">
+            <button class="btn primary" type="submit">立即兑换</button>
+          </div>
+        </form>
+
+        <div id="redeemNotice" class="notice info">登录后即可兑换 CDK；兑换成功会立即刷新次数统计。</div>
+
+        <div id="redeemSuccessCard" class="success-panel hidden-block">
+          <div class="success-title">最近一次兑换成功</div>
+          <div class="tiny-grid success-grid">
+            <article class="tiny-card">
+              <div class="tiny-k">兑换码</div>
+              <div id="redeemCodeResult" class="tiny-v small">--</div>
+            </article>
+            <article class="tiny-card">
+              <div class="tiny-k">到账次数</div>
+              <div id="redeemQuotaResult" class="tiny-v">--</div>
+            </article>
+            <article class="tiny-card">
+              <div class="tiny-k">兑换时间</div>
+              <div id="redeemTimeResult" class="tiny-v small">--</div>
+            </article>
+          </div>
+        </div>
+
+        <ul class="bullet-list rule-list">
+          <li>成功执行一次打码会扣减 1 次。</li>
+          <li>失败不扣次，页面会明确展示成功次数与失败次数。</li>
+          <li>用户态接口优先，API Key 兼容模式仅用于老接入方调试。</li>
+          <li>如果当前已经登录，会直接显示“是否已注册 = 已注册”。</li>
+        </ul>
+      </article>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <div>
+          <div class="section-eyebrow">用户次数看板</div>
+          <h2>剩余次数、已用次数与成功统计</h2>
+        </div>
+        <div class="inline-actions right">
+          <button id="refreshUserBtn" class="btn subtle" type="button">刷新用户数据</button>
+        </div>
+      </div>
+
+      <div class="me-grid">
+        <article class="me-card">
+          <div class="me-k">剩余次数</div>
+          <div id="meQuotaRemaining" class="me-v">--</div>
+        </article>
+        <article class="me-card">
+          <div class="me-k">已用次数</div>
+          <div id="meQuotaUsed" class="me-v">--</div>
+        </article>
+        <article class="me-card">
+          <div class="me-k">成功次数</div>
+          <div id="meSolveSuccess" class="me-v">--</div>
+        </article>
+        <article class="me-card">
+          <div class="me-k">失败次数</div>
+          <div id="meSolveFailed" class="me-v">--</div>
+        </article>
+        <article class="me-card">
+          <div class="me-k">成功率</div>
+          <div id="meSuccessRate" class="me-v">--</div>
+        </article>
+        <article class="me-card">
+          <div class="me-k">最近请求</div>
+          <div id="meLastRequest" class="me-v small">--</div>
+        </article>
+      </div>
+
+      <div class="info-band">
+        <span class="tag">扣次规则</span>
+        <span id="usageRuleText">成功 solve 才扣减 1 次，失败 / error 上报不额外扣次。</span>
+      </div>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <div>
+          <div class="section-eyebrow">快速接入</div>
+          <h2>用户态接口示例</h2>
+        </div>
+        <p class="section-desc">示例默认按“已登录用户态接口”展示；高级兼容模式仍可继续走 API Key。</p>
+      </div>
+
+      <div class="code-grid">
+        <article class="code-card">
+          <div class="code-toolbar">
+            <h3>健康检查</h3>
+            <button class="copy-btn" type="button" data-copy-target="codeHealth">复制</button>
+          </div>
+          <pre id="codeHealth" class="code-block"></pre>
+        </article>
+        <article class="code-card">
+          <div class="code-toolbar">
+            <h3>用户态 Solve</h3>
+            <button class="copy-btn" type="button" data-copy-target="codeSolve">复制</button>
+          </div>
+          <pre id="codeSolve" class="code-block"></pre>
+        </article>
+        <article class="code-card">
+          <div class="code-toolbar">
+            <h3>用户态 Finish</h3>
+            <button class="copy-btn" type="button" data-copy-target="codeFinish">复制</button>
+          </div>
+          <pre id="codeFinish" class="code-block"></pre>
+        </article>
+        <article class="code-card">
+          <div class="code-toolbar">
+            <h3>用户态 Custom Score</h3>
+            <button class="copy-btn" type="button" data-copy-target="codeScore">复制</button>
+          </div>
+          <pre id="codeScore" class="code-block"></pre>
+        </article>
+      </div>
+    </section>
+
+    <section id="playground" class="section">
+      <div class="section-head">
+        <div>
+          <div class="section-eyebrow">在线调试</div>
+          <h2>用户态联调工作台</h2>
+        </div>
+        <p class="section-desc">主按钮优先走用户态接口；未登录时才建议切换到下方 API Key 高级兼容模式。</p>
+      </div>
+
+      <div class="playground-grid">
+        <form id="solveForm" class="tool-card">
+          <div class="tool-head">
+            <h3>Solve 调试</h3>
+            <span id="solveModeTag" class="tag">POST /api/portal/user/solve</span>
+          </div>
+          <label class="field"><span>project_id</span><input id="solveProjectId" value="demo-project" /></label>
+          <label class="field">
+            <span>action</span>
+            <select id="solveAction">
+              <option value="IMAGE_GENERATION">IMAGE_GENERATION</option>
+              <option value="VIDEO_GENERATION">VIDEO_GENERATION</option>
+              <option value="UPSAMPLE">UPSAMPLE</option>
+            </select>
+          </label>
+          <label class="field"><span>token_id（可选）</span><input id="solveTokenId" type="number" placeholder="留空则不传" /></label>
+          <div class="inline-actions">
+            <button class="btn primary" type="submit">发送 Solve</button>
+          </div>
+        </form>
+
+        <form id="scoreForm" class="tool-card">
+          <div class="tool-head">
+            <h3>Custom Score 调试</h3>
+            <span id="scoreModeTag" class="tag">POST /api/portal/user/custom-score</span>
+          </div>
+          <label class="field"><span>website_url</span><input id="scoreWebsiteUrl" value="https://antcpt.com/score_detector/" /></label>
+          <label class="field"><span>website_key</span><input id="scoreWebsiteKey" value="6LcR_okUAAAAAPYrPe-HK_0RULO1aZM15ENyM-Mf" /></label>
+          <label class="field"><span>verify_url</span><input id="scoreVerifyUrl" value="https://antcpt.com/score_detector/verify.php" /></label>
+          <label class="field"><span>action</span><input id="scoreAction" value="homepage" /></label>
+          <label class="checkbox-line"><input id="scoreEnterprise" type="checkbox" /> enterprise</label>
+          <div class="inline-actions">
+            <button class="btn primary" type="submit">发送 Score 调试</button>
+          </div>
+        </form>
+
+        <div class="tool-card">
+          <div class="tool-head">
+            <h3>Session 工具箱</h3>
+            <span id="sessionModeTag" class="tag">finish / error</span>
+          </div>
+          <label class="field"><span>session_id</span><input id="sessionIdInput" placeholder="solve 后会自动回填" /></label>
+          <label class="field">
+            <span>finish.status</span>
+            <select id="finishStatus">
+              <option value="success">success</option>
+              <option value="failed">failed</option>
+              <option value="cancelled">cancelled</option>
+            </select>
+          </label>
+          <label class="field"><span>error_reason</span><input id="errorReasonInput" value="upstream_error" /></label>
+          <div class="inline-actions wrap">
+            <button id="finishBtn" class="btn primary" type="button">发送 Finish</button>
+            <button id="errorBtn" class="btn danger" type="button">发送 Error</button>
+            <button id="useLastSessionBtn" class="btn ghost" type="button">使用最近 Session</button>
+          </div>
+        </div>
+      </div>
+
+      <article class="response-card">
+        <div class="code-toolbar">
+          <div>
+            <h3>响应结果</h3>
+            <p class="response-desc">注册、登录、兑换、solve 成功后都会在这里显示成功提示与响应详情。</p>
+          </div>
+          <div id="responseMeta" class="tag muted">等待请求</div>
+        </div>
+        <pre id="responseViewer" class="response-block">{
+  "message": "这里显示接口响应"
+}</pre>
+      </article>
+    </section>
+
+    <section class="section">
+      <div class="section-head">
+        <div>
+          <div class="section-eyebrow">用户日志</div>
+          <h2>我的最近日志</h2>
+        </div>
+        <div class="inline-actions right">
+          <span id="logsModeBadge" class="tag muted">当前来源：用户态</span>
+        </div>
+      </div>
+      <p class="section-desc">默认查询当前登录用户的日志；如果切到 API Key 兼容模式，则会查询对应 API Key 的日志。</p>
+
+      <div class="log-toolbar">
+        <label class="field">
+          <span>按状态筛选</span>
+          <select id="logStatusFilter">
+            <option value="">全部状态</option>
+            <option value="success">success</option>
+            <option value="success_master_dispatch">success_master_dispatch</option>
+            <option value="failed">failed</option>
+            <option value="finish:success">finish:success</option>
+            <option value="finish:cancelled">finish:cancelled</option>
+            <option value="error_reported">error_reported</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>按项目筛选</span>
+          <input id="logProjectFilter" type="text" placeholder="输入 project_id，例如 demo-project" />
+        </label>
+        <div class="inline-actions right">
+          <button id="refreshLogsBtn" class="btn subtle" type="button">刷新日志</button>
+        </div>
+      </div>
+
+      <div class="table-wrap card">
+        <table>
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>状态</th>
+              <th>project_id</th>
+              <th>action</th>
+              <th>session_id</th>
+              <th>耗时</th>
+            </tr>
+          </thead>
+          <tbody id="logsTableBody">
+            <tr>
+              <td colspan="6" class="empty-cell">登录用户后可查看自己的最近日志。</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="section">
+      <details class="compat-panel card">
+        <summary class="compat-summary">
+          <div>
+            <div class="section-eyebrow">高级兼容模式</div>
+            <h2>仍可连接 API Key</h2>
+          </div>
+          <span class="tag muted">兼容旧接入</span>
+        </summary>
+
+        <div class="compat-body split-layout compact-top">
+          <article class="panel card inner-panel">
+            <div class="section-head compact">
+              <div>
+                <div class="section-eyebrow">API Key 兼容入口</div>
+                <h2>连接你的 API Key</h2>
+              </div>
+            </div>
+
+            <form id="connectForm" class="stack-form">
+              <label class="field">
+                <span>API Key</span>
+                <input id="apiKeyInput" type="password" placeholder="输入你的服务 API Key" autocomplete="off" />
+              </label>
+              <div class="inline-actions">
+                <label class="checkbox-line"><input id="rememberKey" type="checkbox" /> 记住到当前浏览器</label>
+                <button class="btn primary" type="submit">连接并加载</button>
+                <button id="disconnectBtn" class="btn ghost" type="button">断开</button>
+              </div>
+            </form>
+
+            <div id="compatNotice" class="notice info">仅当你需要兼容旧 API Key 工作流时，再使用这里。</div>
+
+            <div class="tiny-grid">
+              <article class="tiny-card">
+                <div class="tiny-k">连接状态</div>
+                <div id="tinyConnectState" class="tiny-v">未连接</div>
+              </article>
+              <article class="tiny-card">
+                <div class="tiny-k">Key 前缀</div>
+                <div id="tinyKeyPrefix" class="tiny-v">--</div>
+              </article>
+              <article class="tiny-card">
+                <div class="tiny-k">额度模式</div>
+                <div id="tinyQuotaMode" class="tiny-v">--</div>
+              </article>
+              <article class="tiny-card">
+                <div class="tiny-k">最近请求</div>
+                <div id="tinyLastRequest" class="tiny-v small">--</div>
+              </article>
+            </div>
+          </article>
+
+          <article class="panel card inner-panel soft-panel">
+            <div class="section-head compact">
+              <div>
+                <div class="section-eyebrow">模式说明</div>
+                <h2>用户态优先，API Key 兜底</h2>
+              </div>
+            </div>
+            <ul class="bullet-list">
+              <li>已登录用户时，主按钮默认走 `/api/portal/user/*`。</li>
+              <li>未登录但已连接 API Key 时，会自动切到兼容模式。</li>
+              <li>用户模式适合注册、CDK 兑换、次数统计与成功提示。</li>
+              <li>API Key 模式适合老脚本排错与兼容性验证。</li>
+            </ul>
+          </article>
+        </div>
+      </details>
+    </section>
+
+    <footer class="footer">
+      <div>flow_captcha_service 用户门户</div>
+      <div class="footer-links">
+        <a href="/admin">管理员后台</a>
+        <a href="/api/v1/health" target="_blank" rel="noreferrer">健康检查</a>
+      </div>
+    </footer>
+  </main>
+
+  <script src="/static/portal.js"></script>
+</body>
+</html>

@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from ..core.auth import issue_admin_token, revoke_admin_token, verify_admin_token
+from ..core.auth import issue_admin_token, revoke_admin_token, revoke_portal_user_tokens_by_user_id, verify_admin_token
 from ..core.config import config
 from ..core.database import Database
 from ..core.logger import debug_logger
@@ -13,6 +13,9 @@ from ..core.models import (
     ClusterNodeUpdateRequest,
     CreateApiKeyRequest,
     LoginRequest,
+    PortalCdkBatchCreateRequest,
+    PortalUserUpdateRequest,
+    UpdateCdkRequest,
     UpdateAdminCredentialsRequest,
     UpdateApiKeyRequest,
     UpdateCaptchaConfigRequest,
@@ -43,6 +46,11 @@ def _assert_master_role(feature_name: str):
 def _assert_local_captcha_role():
     if config.cluster_role == "master":
         raise HTTPException(status_code=400, detail="master 角色不执行本地打码，无需配置运行时打码参数")
+
+
+def _assert_portal_admin_role(feature_name: str):
+    if config.cluster_role == "subnode":
+        raise HTTPException(status_code=400, detail=f"当前 subnode 角色不可用：{feature_name}")
 
 
 async def _build_setup_guide_payload() -> Dict[str, Any]:
@@ -619,6 +627,123 @@ async def update_api_key(
         raise HTTPException(status_code=404, detail="API Key 不存在")
 
     return {"success": True, "item": item}
+
+
+@router.get("/users")
+@router.get("/portal-users")
+async def list_portal_users(token: str = Depends(verify_admin_token)):
+    if _db is None:
+        raise HTTPException(status_code=500, detail="服务未初始化")
+    _assert_portal_admin_role("用户管理")
+    items = await _db.list_portal_users()
+    return {"success": True, "items": items}
+
+
+@router.patch("/users/{user_id}")
+@router.patch("/portal-users/{user_id}")
+async def update_portal_user(
+    user_id: int,
+    request: PortalUserUpdateRequest,
+    token: str = Depends(verify_admin_token),
+):
+    if _db is None:
+        raise HTTPException(status_code=500, detail="服务未初始化")
+    _assert_portal_admin_role("用户管理")
+
+    updated = await _db.update_portal_user(
+        user_id=user_id,
+        enabled=request.enabled,
+        display_name=request.display_name,
+        quota_remaining_delta=request.quota_remaining_delta,
+        new_password=request.new_password,
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="用户不存在")
+    return {"success": True, "item": updated}
+
+
+@router.delete("/users/{user_id}")
+@router.delete("/portal-users/{user_id}")
+async def soft_delete_portal_user(
+    user_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    if _db is None:
+        raise HTTPException(status_code=500, detail="??????")
+    _assert_portal_admin_role("????")
+
+    updated = await _db.update_portal_user(user_id=user_id, enabled=False)
+    if not updated:
+        raise HTTPException(status_code=404, detail="?????")
+
+    revoke_portal_user_tokens_by_user_id(user_id)
+    return {"success": True, "item": updated, "message": f"?? #{user_id} ?????????"}
+
+
+@router.get("/cdks")
+@router.get("/portal-cdks")
+async def list_portal_cdks(token: str = Depends(verify_admin_token)):
+    if _db is None:
+        raise HTTPException(status_code=500, detail="服务未初始化")
+    _assert_portal_admin_role("CDK ??")
+    items = await _db.list_portal_cdks(limit=500)
+    return {"success": True, "items": items}
+
+
+@router.post("/cdks/batch")
+@router.post("/portal-cdks/batch")
+async def create_portal_cdks_batch(
+    request: PortalCdkBatchCreateRequest,
+    token: str = Depends(verify_admin_token),
+):
+    if _db is None:
+        raise HTTPException(status_code=500, detail="服务未初始化")
+    _assert_portal_admin_role("CDK ??")
+
+    items = await _db.create_portal_cdks_batch(
+        count=request.count,
+        quota_times=request.quota_times,
+        prefix=request.prefix,
+        note=request.note,
+    )
+    return {
+        "success": True,
+        "items": items,
+        "message": f"已生成 {len(items)} 个 CDK，请立即复制保存。",
+    }
+
+
+@router.patch("/cdks/{cdk_id}")
+@router.patch("/portal-cdks/{cdk_id}")
+async def update_portal_cdk(
+    cdk_id: int,
+    request: UpdateCdkRequest,
+    token: str = Depends(verify_admin_token),
+):
+    if _db is None:
+        raise HTTPException(status_code=500, detail="服务未初始化")
+    _assert_portal_admin_role("CDK ??")
+
+    updated = await _db.update_portal_cdk(cdk_id=cdk_id, enabled=request.enabled)
+    if not updated:
+        raise HTTPException(status_code=404, detail="CDK ???")
+    return {"success": True, "item": updated}
+
+
+@router.delete("/cdks/{cdk_id}")
+@router.delete("/portal-cdks/{cdk_id}")
+async def soft_delete_portal_cdk(
+    cdk_id: int,
+    token: str = Depends(verify_admin_token),
+):
+    if _db is None:
+        raise HTTPException(status_code=500, detail="??????")
+    _assert_portal_admin_role("CDK ??")
+
+    updated = await _db.update_portal_cdk(cdk_id=cdk_id, enabled=False)
+    if not updated:
+        raise HTTPException(status_code=404, detail="CDK ???")
+    return {"success": True, "item": updated, "message": f"CDK #{cdk_id} ?????????"}
 
 
 @router.get("/logs")

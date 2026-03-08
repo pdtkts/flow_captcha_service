@@ -2,12 +2,12 @@
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from .api import admin, cluster, service
+from .api import admin, cluster, portal, service
 from .core.auth import set_database
 from .core.config import config
 from .core.database import Database
@@ -24,6 +24,7 @@ set_database(db)
 service.set_dependencies(db, runtime, cluster_manager)
 admin.set_dependencies(db, runtime, cluster_manager)
 cluster.set_dependencies(db, cluster_manager)
+portal.set_dependencies(db, runtime, cluster_manager)
 
 
 @asynccontextmanager
@@ -65,25 +66,41 @@ app.add_middleware(
 app.include_router(service.router)
 app.include_router(admin.router)
 app.include_router(cluster.router)
+app.include_router(portal.router)
 
 static_dir = config.root_dir / "static"
 if static_dir.exists():
     app.mount("/static", StaticFiles(directory=str(static_dir)), name="static")
 
 
-@app.get("/admin", include_in_schema=False)
-async def admin_panel():
-    page_path = static_dir / "admin.html"
+def _static_page(filename: str, missing_message: str):
+    page_path = static_dir / filename
     if not page_path.exists():
-        raise HTTPException(status_code=404, detail="管理面板页面不存在")
+        raise HTTPException(status_code=404, detail=missing_message)
     return FileResponse(page_path)
 
 
-@app.get("/")
-async def root():
+@app.get("/", include_in_schema=False)
+async def root(request: Request):
+    accept = str(request.headers.get("accept") or "")
+    if "text/html" in accept:
+        return _static_page("portal.html", "用户门户页面不存在")
+
     return {
         "service": "flow_captcha_service",
         "status": "ok",
         "node": config.node_name,
         "role": config.cluster_role,
+        "portal": "/portal",
+        "admin": "/admin",
     }
+
+
+@app.get("/portal", include_in_schema=False)
+async def portal_alias():
+    return _static_page("portal.html", "用户门户页面不存在")
+
+
+@app.get("/admin", include_in_schema=False)
+async def admin_panel():
+    return _static_page("admin.html", "管理面板页面不存在")
