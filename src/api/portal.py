@@ -44,6 +44,7 @@ _db: Optional[Database] = None
 _runtime: Optional[CaptchaRuntime] = None
 _cluster: Optional[ClusterManager] = None
 PORTAL_OIDC_STATE_COOKIE = "portal_oidc_state"
+OIDC_IMPERSONATE_CANDIDATES = ("chrome136", "chrome133a", "chrome131", "chrome124", "chrome110", "chrome")
 
 
 def set_dependencies(db: Database, runtime: CaptchaRuntime, cluster_manager: ClusterManager):
@@ -190,22 +191,38 @@ async def _oidc_http_request(
     sanitized_body = _sanitize_oidc_body(body)
 
     def _send() -> tuple[int, str, str]:
-        response = curl_requests.request(
-            method=method.upper(),
-            url=url,
-            headers=effective_headers,
-            data=body,
-            timeout=20,
-            impersonate="chrome136",
-        )
-        try:
-            return (
-                int(getattr(response, "status_code", 200)),
-                str(response.headers.get("Content-Type") or ""),
-                response.text,
-            )
-        finally:
-            response.close()
+        last_error: Optional[Exception] = None
+        for impersonate_name in OIDC_IMPERSONATE_CANDIDATES:
+            try:
+                response = curl_requests.request(
+                    method=method.upper(),
+                    url=url,
+                    headers=effective_headers,
+                    data=body,
+                    timeout=20,
+                    impersonate=impersonate_name,
+                )
+                try:
+                    return (
+                        int(getattr(response, "status_code", 200)),
+                        str(response.headers.get("Content-Type") or ""),
+                        response.text,
+                    )
+                finally:
+                    response.close()
+            except Exception as exc:
+                error_text = str(exc)
+                if "Impersonating" in error_text and "is not supported" in error_text:
+                    debug_logger.log_warning(
+                        "[portal_oidc] unsupported impersonate profile "
+                        f"profile={impersonate_name} url={url} error={error_text}"
+                    )
+                    last_error = exc
+                    continue
+                raise
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("OIDC impersonate fallback exhausted")
 
     try:
         status, content_type, text = await asyncio.to_thread(_send)
