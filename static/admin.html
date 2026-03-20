@@ -2149,7 +2149,7 @@
             <div class="cluster-kpi"><div class="k">平均心跳延迟</div><div id="clusterKpiHeartbeat" class="v">-</div><div class="s">单位：秒</div></div>
           </div>
           <div class="cluster-toolbar">
-            <div class="field"><label>搜索节点</label><input id="clusterSearchInput" placeholder="按节点名、地址、异常原因过滤" /></div>
+            <div class="field"><label>搜索节点</label><input id="clusterSearchInput" placeholder="按节点名、地址、异常原因、错误详情过滤" /></div>
             <div class="field"><label>健康筛选</label><select id="clusterHealthFilter"><option value="all">全部</option><option value="healthy">仅健康</option><option value="abnormal">仅异常</option><option value="timeout">仅超时</option><option value="report_failed">仅上报失败</option><option value="auth_failed">仅认证失败</option><option value="disabled">仅已禁用</option></select></div>
             <div class="field"><label>最近刷新</label><input id="clusterLastUpdated" readonly placeholder="未刷新" /></div>
           </div>
@@ -2876,6 +2876,7 @@
           ["地址", item.base_url || "-"],
           ["健康状态", item.is_healthy ? "健康" : "异常"],
           ["异常原因", item.health_reason || "-"],
+          ["最近错误", item.last_error || "-"],
           ["心跳延迟(s)", item.heartbeat_age_seconds ?? "-"],
           ["browser_count", item.browser_count ?? "-"],
           ["node_max_concurrency", item.node_max_concurrency ?? "-"],
@@ -2973,6 +2974,7 @@
           item.base_url,
           item.health_reason,
           item.health_reason_code,
+          item.last_error,
         ].map((x) => String(x || "").toLowerCase()).join(" ");
         return haystack.includes(keyword);
       };
@@ -3033,7 +3035,8 @@
           const threadIdle = it.thread_idle ?? "-";
           const lastHeartbeatText = esc(it.last_heartbeat_at || "-");
           const lastHeartbeatHtml = lastHeartbeatText === "-" ? "-" : lastHeartbeatText.replace(" ", "<br/>");
-          tr.innerHTML = `<td><span class="node-id mono">#${it.id}</span></td><td><div class="node-name">${esc(it.node_name || "-")}</div></td><td class="mono node-url">${esc(it.base_url || "-")}</td><td><span class="status-badge ${healthClass}">${healthText}</span></td><td><input type="checkbox" data-node-id="${it.id}" data-node-key="enabled" ${it.enabled ? "checked" : ""} /></td><td><span class="metric-chip mono">${it.browser_count ?? "-"}</span></td><td><span class="metric-chip mono">${it.node_max_concurrency ?? "-"}</span></td><td><span class="metric-chip strong mono">${effectiveCapacity}</span></td><td><span class="metric-chip active mono">${threadActive}</span></td><td><span class="metric-chip idle mono">${threadIdle}</span></td><td><span class="status-badge ${ageClass}">${ageText}</span></td><td><span class="status-badge ${reasonClass} reason-badge">${esc(it.health_reason || "-")}</span></td><td><input class="input-mini mono" data-node-id="${it.id}" data-node-key="weight" value="${it.weight ?? 100}" /></td><td><div class="time-cell">${lastHeartbeatHtml}</div></td><td><div class="cluster-actions"><button class="secondary" data-action="detail-node" data-id="${it.id}">详情</button><button class="secondary" data-action="save-node" data-id="${it.id}">保存</button><button class="warn" data-action="delete-node" data-id="${it.id}">删除</button></div></td>`;
+          const reasonTitle = esc(it.last_error || it.health_reason || "-");
+          tr.innerHTML = `<td><span class="node-id mono">#${it.id}</span></td><td><div class="node-name">${esc(it.node_name || "-")}</div></td><td class="mono node-url">${esc(it.base_url || "-")}</td><td><span class="status-badge ${healthClass}">${healthText}</span></td><td><input type="checkbox" data-node-id="${it.id}" data-node-key="enabled" ${it.enabled ? "checked" : ""} /></td><td><span class="metric-chip mono">${it.browser_count ?? "-"}</span></td><td><span class="metric-chip mono">${it.node_max_concurrency ?? "-"}</span></td><td><span class="metric-chip strong mono">${effectiveCapacity}</span></td><td><span class="metric-chip active mono">${threadActive}</span></td><td><span class="metric-chip idle mono">${threadIdle}</span></td><td><span class="status-badge ${ageClass}">${ageText}</span></td><td><span class="status-badge ${reasonClass} reason-badge" title="${reasonTitle}">${esc(it.health_reason || "-")}</span></td><td><input class="input-mini mono" data-node-id="${it.id}" data-node-key="weight" value="${it.weight ?? 100}" /></td><td><div class="time-cell">${lastHeartbeatHtml}</div></td><td><div class="cluster-actions"><button class="secondary" data-action="detail-node" data-id="${it.id}">详情</button><button class="secondary" data-action="save-node" data-id="${it.id}">保存</button><button class="warn" data-action="delete-node" data-id="${it.id}">删除</button></div></td>`;
           b.appendChild(tr);
         }
       };

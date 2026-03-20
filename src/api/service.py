@@ -28,6 +28,19 @@ def set_dependencies(db: Database, runtime: CaptchaRuntime, cluster_manager: Clu
     _cluster = cluster_manager
 
 
+def _resolve_service_request_owner(api_key: dict) -> tuple[Optional[int], Optional[int], Optional[int]]:
+    if bool(api_key.get("is_internal")):
+        return None, None, None
+
+    portal_user_id = int(api_key.get("portal_user_id") or 0)
+    portal_api_key_id = int(api_key.get("portal_api_key_id") or 0)
+    if portal_user_id > 0:
+        return None, portal_user_id, portal_api_key_id or None
+
+    service_api_key_id = int(api_key.get("id", 0) or 0)
+    return (service_api_key_id if service_api_key_id > 0 else None), None, None
+
+
 async def _safe_create_job_log(**kwargs):
     if _db is None:
         return
@@ -58,12 +71,11 @@ async def solve_captcha(
     if _db is None or _runtime is None:
         raise HTTPException(status_code=500, detail="服务未初始化")
 
-    portal_user_id = int(api_key.get("portal_user_id") or 0)
-    portal_api_key_id = int(api_key.get("portal_api_key_id") or 0)
-    if portal_user_id > 0:
+    service_api_key_id, portal_user_id, portal_api_key_id = _resolve_service_request_owner(api_key)
+    if portal_user_id:
         available, message = await _db.ensure_portal_user_available(portal_user_id)
     else:
-        available, message = await _db.ensure_api_key_available(int(api_key.get("id", 0)))
+        available, message = await _db.ensure_api_key_available(service_api_key_id or 0)
     if not available:
         raise HTTPException(status_code=403, detail=message)
 
@@ -81,11 +93,11 @@ async def solve_captcha(
                 project_id=request.project_id,
                 action=request.action,
                 token_id=request.token_id,
-                api_key_id=int(api_key.get("id", 0)),
+                api_key_id=service_api_key_id or 0,
             )
             log_status = "success"
 
-        if portal_user_id > 0:
+        if portal_user_id:
             consumed, consume_message = await _db.consume_portal_user_quota(
                 portal_user_id,
                 source_type="api_solve_success",
@@ -95,7 +107,7 @@ async def solve_captcha(
             )
         else:
             consumed, consume_message = await _db.consume_api_key_quota(
-                int(api_key.get("id", 0)),
+                service_api_key_id or 0,
                 session_id=str(result.get("session_id") or "") if result else None,
             )
 
@@ -115,14 +127,14 @@ async def solve_captcha(
         elapsed = int((time.perf_counter() - started) * 1000)
         await _safe_create_job_log(
             session_id=result.get("session_id") if result else None,
-            api_key_id=int(api_key.get("id", 0)),
+            api_key_id=service_api_key_id,
             project_id=request.project_id,
             action=request.action,
             status=log_status,
             error_reason=None,
             duration_ms=elapsed,
-            portal_user_id=portal_user_id or None,
-            portal_api_key_id=portal_api_key_id or None,
+            portal_user_id=portal_user_id,
+            portal_api_key_id=portal_api_key_id,
         )
 
         return SolveResponse(**(result or {}))
@@ -132,14 +144,14 @@ async def solve_captcha(
         elapsed = int((time.perf_counter() - started) * 1000)
         await _safe_create_job_log(
             session_id=result.get("session_id") if result else None,
-            api_key_id=int(api_key.get("id", 0)),
+            api_key_id=service_api_key_id,
             project_id=request.project_id,
             action=request.action,
             status="failed",
             error_reason=str(e),
             duration_ms=elapsed,
-            portal_user_id=portal_user_id or None,
-            portal_api_key_id=portal_api_key_id or None,
+            portal_user_id=portal_user_id,
+            portal_api_key_id=portal_api_key_id,
         )
         raise HTTPException(status_code=500, detail=f"打码失败: {e}")
 
@@ -153,6 +165,7 @@ async def finish_session(
     if _db is None or _runtime is None:
         raise HTTPException(status_code=500, detail="服务未初始化")
 
+    service_api_key_id, portal_user_id, portal_api_key_id = _resolve_service_request_owner(api_key)
     entry = None
     if config.cluster_role == "master" and ":" in session_id:
         if _cluster is None:
@@ -183,13 +196,13 @@ async def finish_session(
     try:
         await _db.finalize_service_session(
             session_id=session_id,
-            api_key_id=int(api_key.get("id", 0)),
+            api_key_id=service_api_key_id,
             project_id=entry.project_id if entry else None,
             action=entry.action if entry else None,
             status=f"finish:{request.status}",
             error_reason=None,
-            portal_user_id=int(api_key.get("portal_user_id") or 0) or None,
-            portal_api_key_id=int(api_key.get("portal_api_key_id") or 0) or None,
+            portal_user_id=portal_user_id,
+            portal_api_key_id=portal_api_key_id,
             refund_reason=refund_reason,
         )
     except Exception as e:
@@ -209,6 +222,7 @@ async def report_session_error(
     if _db is None or _runtime is None:
         raise HTTPException(status_code=500, detail="服务未初始化")
 
+    service_api_key_id, portal_user_id, portal_api_key_id = _resolve_service_request_owner(api_key)
     entry = None
     if config.cluster_role == "master" and ":" in session_id:
         if _cluster is None:
@@ -237,13 +251,13 @@ async def report_session_error(
     try:
         await _db.finalize_service_session(
             session_id=session_id,
-            api_key_id=int(api_key.get("id", 0)),
+            api_key_id=service_api_key_id,
             project_id=entry.project_id if entry else None,
             action=entry.action if entry else None,
             status="error_reported",
             error_reason=request.error_reason,
-            portal_user_id=int(api_key.get("portal_user_id") or 0) or None,
-            portal_api_key_id=int(api_key.get("portal_api_key_id") or 0) or None,
+            portal_user_id=portal_user_id,
+            portal_api_key_id=portal_api_key_id,
             refund_reason=request.error_reason or "error_reported",
         )
     except Exception as e:

@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import aiosqlite
 
 from .config import config
+from .logger import debug_logger
 from .models import CaptchaConfig
 
 
@@ -38,6 +39,14 @@ class Database:
         async with self._write_lock:
             async with self._connect() as db:
                 yield db
+
+    @staticmethod
+    def _normalize_optional_positive_int(value: Optional[int]) -> Optional[int]:
+        try:
+            normalized = int(value or 0)
+        except (TypeError, ValueError):
+            return None
+        return normalized if normalized > 0 else None
 
     async def _create_portal_user_job_log_in_tx(
         self,
@@ -73,12 +82,29 @@ class Database:
         portal_user_id: Optional[int] = None,
         portal_api_key_id: Optional[int] = None,
     ):
+        normalized_api_key_id = self._normalize_optional_positive_int(api_key_id)
+        normalized_portal_user_id = self._normalize_optional_positive_int(portal_user_id)
+        normalized_portal_api_key_id = self._normalize_optional_positive_int(portal_api_key_id)
+
+        if normalized_portal_user_id or normalized_portal_api_key_id:
+            normalized_api_key_id = None
+
         await db.execute(
             """
             INSERT INTO captcha_jobs (session_id, api_key_id, project_id, action, status, error_reason, duration_ms, portal_user_id, portal_api_key_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (session_id, api_key_id, project_id, action, status, error_reason, duration_ms, portal_user_id, portal_api_key_id),
+            (
+                session_id,
+                normalized_api_key_id,
+                project_id,
+                action,
+                status,
+                error_reason,
+                duration_ms,
+                normalized_portal_user_id,
+                normalized_portal_api_key_id,
+            ),
         )
 
     async def _refund_portal_user_quota_in_tx(
@@ -430,6 +456,7 @@ class Database:
             await self._ensure_cluster_nodes_columns(db)
             await self._add_column_if_missing(db, "captcha_jobs", "portal_user_id", "INTEGER")
             await self._add_column_if_missing(db, "captcha_jobs", "portal_api_key_id", "INTEGER")
+            await self._repair_captcha_jobs_owner_references(db)
 
             await db.execute(
                 """
@@ -565,6 +592,97 @@ class Database:
         if column_name in existing:
             return
         await db.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}")
+
+    async def _repair_captcha_jobs_owner_references(self, db: aiosqlite.Connection):
+        cursor = await db.execute(
+            """
+            SELECT COUNT(*)
+            FROM captcha_jobs j
+            LEFT JOIN service_api_keys k ON k.id = j.api_key_id
+            WHERE j.api_key_id IS NOT NULL
+              AND j.api_key_id > 0
+              AND k.id IS NULL
+            """
+        )
+        row = await cursor.fetchone()
+        invalid_before = int(row[0] or 0) if row else 0
+        if invalid_before <= 0:
+            return
+
+        remap_portal_key_cursor = await db.execute(
+            """
+            UPDATE captcha_jobs
+            SET portal_api_key_id = api_key_id
+            WHERE (portal_api_key_id IS NULL OR portal_api_key_id <= 0)
+              AND api_key_id IS NOT NULL
+              AND api_key_id > 0
+              AND NOT EXISTS (SELECT 1 FROM service_api_keys k WHERE k.id = captcha_jobs.api_key_id)
+              AND EXISTS (SELECT 1 FROM portal_user_api_keys pk WHERE pk.id = captcha_jobs.api_key_id)
+            """
+        )
+        remap_portal_key_count = int(remap_portal_key_cursor.rowcount or 0)
+
+        fill_portal_user_cursor = await db.execute(
+            """
+            UPDATE captcha_jobs
+            SET portal_user_id = (
+                SELECT pk.portal_user_id
+                FROM portal_user_api_keys pk
+                WHERE pk.id = captcha_jobs.portal_api_key_id
+            )
+            WHERE (portal_user_id IS NULL OR portal_user_id <= 0)
+              AND portal_api_key_id IS NOT NULL
+              AND portal_api_key_id > 0
+              AND EXISTS (SELECT 1 FROM portal_user_api_keys pk WHERE pk.id = captcha_jobs.portal_api_key_id)
+            """
+        )
+        fill_portal_user_count = int(fill_portal_user_cursor.rowcount or 0)
+
+        clear_portal_owner_api_key_cursor = await db.execute(
+            """
+            UPDATE captcha_jobs
+            SET api_key_id = NULL
+            WHERE api_key_id IS NOT NULL
+              AND (
+                    (portal_user_id IS NOT NULL AND portal_user_id > 0)
+                 OR (portal_api_key_id IS NOT NULL AND portal_api_key_id > 0)
+              )
+            """
+        )
+        clear_portal_owner_api_key_count = int(clear_portal_owner_api_key_cursor.rowcount or 0)
+
+        clear_invalid_api_key_cursor = await db.execute(
+            """
+            UPDATE captcha_jobs
+            SET api_key_id = NULL
+            WHERE api_key_id IS NOT NULL
+              AND (
+                    api_key_id <= 0
+                 OR NOT EXISTS (SELECT 1 FROM service_api_keys k WHERE k.id = captcha_jobs.api_key_id)
+              )
+            """
+        )
+        clear_invalid_api_key_count = int(clear_invalid_api_key_cursor.rowcount or 0)
+
+        cursor = await db.execute(
+            """
+            SELECT COUNT(*)
+            FROM captcha_jobs j
+            LEFT JOIN service_api_keys k ON k.id = j.api_key_id
+            WHERE j.api_key_id IS NOT NULL
+              AND j.api_key_id > 0
+              AND k.id IS NULL
+            """
+        )
+        row = await cursor.fetchone()
+        invalid_after = int(row[0] or 0) if row else 0
+
+        debug_logger.log_info(
+            "[Database] captcha_jobs owner repair "
+            f"invalid_before={invalid_before} remap_portal_key={remap_portal_key_count} "
+            f"fill_portal_user={fill_portal_user_count} clear_portal_owner_api_key={clear_portal_owner_api_key_count} "
+            f"clear_invalid_api_key={clear_invalid_api_key_count} invalid_after={invalid_after}"
+        )
 
     async def _ensure_defaults(self):
         async with self._connect() as db:

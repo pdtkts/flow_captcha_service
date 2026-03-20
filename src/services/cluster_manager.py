@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -13,6 +14,9 @@ from ..core.config import config
 from ..core.database import Database
 from ..core.diagnostics import diag_label
 from ..core.logger import debug_logger
+
+
+_HTTP_STATUS_RE = re.compile(r"\bhttp\s*([1-5]\d{2})\b", re.IGNORECASE)
 
 
 class ClusterManager:
@@ -520,6 +524,46 @@ class ClusterManager:
             return None
 
     @staticmethod
+    def _extract_http_status(error_text: str) -> Optional[int]:
+        match = _HTTP_STATUS_RE.search(str(error_text or ""))
+        if not match:
+            return None
+        try:
+            return int(match.group(1))
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _summarize_last_error(cls, last_error: str) -> Optional[tuple[str, str]]:
+        error_text = str(last_error or "").strip()
+        if not error_text:
+            return None
+
+        lowered_error = error_text.lower()
+        status_code = cls._extract_http_status(error_text)
+        if status_code is not None:
+            if status_code in {401, 403}:
+                return "auth_failed", f"HTTP {status_code}"
+            return "report_failed", f"HTTP {status_code}"
+
+        if "cluster key" in lowered_error or "api key" in lowered_error or "unauthorized" in lowered_error or "forbidden" in lowered_error or "认证" in lowered_error or "无效" in lowered_error:
+            return "auth_failed", "认证失败"
+
+        if "connection refused" in lowered_error or "failed to establish a new connection" in lowered_error:
+            return "report_failed", "连接失败"
+
+        if "node_not_registered" in lowered_error:
+            return "report_failed", "节点未注册"
+
+        if "timed out" in lowered_error or "timeout" in lowered_error:
+            return "timeout", "请求超时"
+
+        if "heartbeat failed" in lowered_error or "register failed" in lowered_error or "上报" in lowered_error:
+            return "report_failed", "上报失败"
+
+        return None
+
+    @staticmethod
     def _classify_health_reason(
         *,
         enabled: bool,
@@ -531,22 +575,15 @@ class ClusterManager:
         if not enabled:
             return "disabled", "已禁用"
 
-        error_text = (last_error or "").strip()
-        lowered_error = error_text.lower()
-        auth_keywords = ("401", "unauthorized", "forbidden", "cluster key", "api key", "认证", "无效")
-        report_keywords = ("heartbeat failed", "register failed", "timed out", "timeout", "connection refused", "node_not_registered", "上报")
-
-        if any(k in lowered_error for k in auth_keywords):
-            return "auth_failed", "认证失败"
-
-        if any(k in lowered_error for k in report_keywords):
-            return "report_failed", "上报失败"
+        summarized_error = ClusterManager._summarize_last_error(last_error)
+        if summarized_error is not None:
+            return summarized_error
 
         if not healthy:
             return "report_failed", "上报失败"
 
         if heartbeat_age_seconds is None or heartbeat_age_seconds > stale_seconds:
-            return "timeout", "超时"
+            return "timeout", "心跳超时"
 
         return "ok", "正常"
 
