@@ -10,6 +10,7 @@ import signal
 os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
 
 import asyncio
+import hashlib
 import time
 import re
 import random
