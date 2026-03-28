@@ -106,7 +106,7 @@ class CaptchaRuntime:
         is_invisible: bool = True,
     ) -> Dict[str, Any]:
         service = await self._get_browser_service()
-        token, browser_id = await service.get_custom_token(
+        token_result = await service.get_custom_token(
             website_url=website_url,
             website_key=website_key,
             action=action,
@@ -114,11 +114,14 @@ class CaptchaRuntime:
             captcha_type=captcha_type,
             is_invisible=is_invisible,
         )
-        token = str(token or "").strip()
+        token = str(token_result.token or "").strip() if token_result else ""
         if not token:
             raise RuntimeError("通用打码失败，未获取到 token")
 
-        fingerprint = await service.get_fingerprint(browser_id)
+        browser_id = token_result.browser_ref if token_result else None
+        fingerprint = token_result.fingerprint if token_result else None
+        if fingerprint is None and browser_id is not None:
+            fingerprint = await service.get_fingerprint(browser_id)
         return {
             "token": token,
             "browser_id": browser_id,

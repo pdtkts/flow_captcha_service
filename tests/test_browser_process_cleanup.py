@@ -85,19 +85,23 @@ class BrowserProcessCleanupTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(terminated, [(11, "stale_slot_process"), (22, "stale_slot_process")])
         write_pid_file.assert_called_once_with(None)
 
-    async def test_custom_token_uses_shared_browser_path(self):
+    async def test_custom_token_uses_fresh_browser_path(self):
         context = object()
         with patch.object(
             self.browser,
-            "_get_or_create_shared_browser",
+            "_open_fresh_browser_context",
             AsyncMock(return_value=(None, None, context)),
-        ) as get_shared_browser:
+        ) as open_fresh_browser:
             with patch.object(
                 self.browser,
                 "_execute_custom_captcha",
                 AsyncMock(return_value="custom-token"),
             ) as execute_custom_captcha:
-                with patch.object(self.browser, "_create_browser", AsyncMock(side_effect=AssertionError("unexpected"))):
+                with patch.object(
+                    self.browser,
+                    "_close_fresh_browser_context",
+                    AsyncMock(),
+                ) as close_fresh_browser:
                     token = await self.browser.get_custom_token(
                         website_url="https://example.com",
                         website_key="site-key",
@@ -105,15 +109,16 @@ class BrowserProcessCleanupTests(unittest.IsolatedAsyncioTestCase):
                     )
 
         self.assertEqual(token, "custom-token")
-        get_shared_browser.assert_awaited_once()
+        open_fresh_browser.assert_awaited_once()
+        close_fresh_browser.assert_awaited_once()
         execute_custom_captcha.assert_awaited_once()
-        self.assertTrue(execute_custom_captcha.await_args.kwargs["reuse_ready_page"])
+        self.assertFalse(execute_custom_captcha.await_args.kwargs["reuse_ready_page"])
 
-    async def test_custom_token_failures_trigger_browser_recycle(self):
+    async def test_custom_token_failures_retry_with_fresh_browser(self):
         context = object()
         with patch.object(
             self.browser,
-            "_get_or_create_shared_browser",
+            "_open_fresh_browser_context",
             AsyncMock(return_value=(None, None, context)),
         ):
             with patch.object(
@@ -121,7 +126,11 @@ class BrowserProcessCleanupTests(unittest.IsolatedAsyncioTestCase):
                 "_execute_custom_captcha",
                 AsyncMock(side_effect=[None, None, None]),
             ):
-                with patch.object(self.browser, "recycle_browser", AsyncMock()) as recycle_browser:
+                with patch.object(
+                    self.browser,
+                    "_close_fresh_browser_context",
+                    AsyncMock(),
+                ) as close_fresh_browser:
                     token = await self.browser.get_custom_token(
                         website_url="https://example.com",
                         website_key="site-key",
@@ -129,7 +138,7 @@ class BrowserProcessCleanupTests(unittest.IsolatedAsyncioTestCase):
                     )
 
         self.assertIsNone(token)
-        self.assertGreaterEqual(recycle_browser.await_count, 1)
+        self.assertGreaterEqual(close_fresh_browser.await_count, 3)
 
 
 if __name__ == "__main__":

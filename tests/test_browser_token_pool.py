@@ -105,20 +105,20 @@ class BrowserTokenPoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.browser_ref, 5)
         self.assertNotIn(self.bucket_key, self.service._standby_tokens)
 
-    async def test_custom_token_uses_shared_browser_path(self):
+    async def test_custom_token_uses_fresh_browser_path(self):
         browser = TokenBrowser(3, "tmp/test-custom-token-shared")
         fake_context = object()
 
         with patch.object(
             browser,
-            "_get_or_create_shared_browser",
+            "_open_fresh_browser_context",
             AsyncMock(return_value=(object(), object(), fake_context)),
-        ) as shared_browser_mock:
+        ) as open_fresh_browser:
             with patch.object(
                 browser,
-                "_create_browser",
-                AsyncMock(side_effect=AssertionError("should not create temporary browser")),
-            ):
+                "_close_fresh_browser_context",
+                AsyncMock(),
+            ) as close_fresh_browser:
                 with patch.object(
                     browser,
                     "_execute_custom_captcha",
@@ -131,9 +131,10 @@ class BrowserTokenPoolTests(unittest.IsolatedAsyncioTestCase):
                     )
 
         self.assertEqual(token, "shared-custom-token")
-        shared_browser_mock.assert_awaited_once()
+        open_fresh_browser.assert_awaited_once()
+        close_fresh_browser.assert_awaited_once()
         execute_mock.assert_awaited_once()
-        self.assertTrue(bool(execute_mock.await_args.kwargs["reuse_ready_page"]))
+        self.assertFalse(bool(execute_mock.await_args.kwargs["reuse_ready_page"]))
 
     async def test_custom_page_cache_hits_same_site(self):
         browser = TokenBrowser(4, "tmp/test-custom-page-cache")
@@ -283,6 +284,12 @@ class BrowserTokenPoolTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 self.get_custom_token = AsyncMock(return_value="service-token")
 
+            def get_last_fingerprint(self):
+                return {"user_agent": "fake-agent"}
+
+            def get_browser_epoch(self):
+                return 12
+
         fake_browser = FakeBrowser()
 
         with patch.object(service, "_check_available"):
@@ -290,15 +297,16 @@ class BrowserTokenPoolTests(unittest.IsolatedAsyncioTestCase):
                 with patch.object(service, "_select_browser_id", AsyncMock(return_value=2)) as select_mock:
                     with patch.object(service, "_get_next_browser_id", side_effect=AssertionError("should not use round robin")):
                         with patch.object(service, "_get_or_create_browser", AsyncMock(return_value=fake_browser)):
-                            token, browser_id = await service.get_custom_token(
+                            result = await service.get_custom_token(
                                 website_url="https://example.com/login",
                                 website_key="site-key",
                                 action="login",
                                 captcha_type="recaptcha_v3",
                             )
 
-        self.assertEqual(token, "service-token")
-        self.assertEqual(browser_id, 2)
+        self.assertEqual(result.token, "service-token")
+        self.assertEqual(result.browser_id, 2)
+        self.assertEqual(result.fingerprint, {"user_agent": "fake-agent"})
         select_mock.assert_awaited_once()
 
     async def test_refill_prefers_other_idle_browser_when_preferred_busy(self):
@@ -420,7 +428,8 @@ class BrowserTokenPoolTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(service._project_affinity_max_keys(), 64)
             self.assertEqual(service._project_affinity_ttl_seconds(), 120.0)
             self.assertEqual(service._standby_bucket_max_count(), 48)
-            self.assertEqual(service._standby_bucket_idle_ttl_seconds(), 300.0)
+            self.assertEqual(service._standby_token_ttl_seconds(), 60.0)
+            self.assertEqual(service._standby_bucket_idle_ttl_seconds(), 180.0)
             self.assertEqual(service._idle_reaper_interval_seconds(), 4.0)
 
     async def test_browser_request_finish_and_execute_timeout_support_auto_mode(self):
@@ -506,9 +515,30 @@ class BrowserTokenPoolTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_store_standby_token_does_not_refresh_bucket_last_used(self):
+        service = BrowserCaptchaService()
+        existing_last_used = 123.0
+        service._standby_bucket_last_used["bucket-sticky"] = existing_last_used
+
+        result = type("Result", (), {})()
+        result.token = "standby-token"
+        result.browser_id = 7
+        result.browser_epoch = 3
+        result.fingerprint = {"user_agent": "ua-live"}
+
+        await service._store_standby_token(
+            "bucket-sticky",
+            result,
+            project_id="project-a",
+            action="IMAGE_GENERATION",
+        )
+
+        self.assertEqual(service._standby_bucket_last_used["bucket-sticky"], existing_last_used)
+
     async def test_refill_retries_until_idle_browser_is_available(self):
         service = BrowserCaptchaService()
         service._browser_count = 2
+        service._standby_bucket_last_used[self.bucket_key] = time.monotonic()
 
         with patch(
             "src.services.browser_captcha.config",

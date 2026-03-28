@@ -208,7 +208,7 @@ class Config:
                 "browser_score_dom_wait_seconds": 25,
                 "browser_recaptcha_settle_seconds": 0,
                 "browser_standby_token_pool_enabled": True,
-                "browser_standby_token_ttl_seconds": 45,
+                "browser_standby_token_ttl_seconds": 60,
                 "browser_standby_token_pool_depth": 2,
                 "browser_standby_bucket_max_count": 0,
                 "browser_standby_bucket_idle_ttl_seconds": 0,
@@ -520,13 +520,13 @@ class Config:
         value = os.getenv("FCS_BROWSER_STANDBY_TOKEN_TTL_SECONDS")
         if value:
             try:
-                return max(5.0, float(value))
+                return min(60.0, max(5.0, float(value)))
             except Exception:
-                return 45.0
+                return 60.0
         try:
-            return max(5.0, float(self._get("captcha", "browser_standby_token_ttl_seconds", 45)))
+            return min(60.0, max(5.0, float(self._get("captcha", "browser_standby_token_ttl_seconds", 60))))
         except Exception:
-            return 45.0
+            return 60.0
 
     @property
     def browser_standby_token_pool_depth(self) -> int:
