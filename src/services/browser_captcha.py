@@ -16,7 +16,7 @@ import re
 import random
 import uuid
 from dataclasses import dataclass
-from typing import Optional, Dict, Any, List, Set, Union
+from typing import Optional, Dict, Any, List, Set, Union, Callable, Awaitable
 from datetime import datetime
 from urllib.parse import urlparse, unquote, parse_qs
 
@@ -580,8 +580,6 @@ class StandbyTokenEntry:
     proxy_signature: str
     created_monotonic: float
     expires_monotonic: float
-
-
 class TokenBrowser:
     """简化版浏览器：每次获取 token 时启动新浏览器，用完即关
     
@@ -1721,6 +1719,7 @@ class TokenBrowser:
                 device_scale_factor=self._profile_device_scale_factor,
                 is_mobile=self._profile_is_mobile,
                 has_touch=self._profile_has_touch,
+                ignore_https_errors=True,
                 extra_http_headers={"Accept-Language": self._profile_accept_language},
             )
             driver_proc = self._extract_driver_proc(playwright=playwright, browser=browser)
@@ -2960,6 +2959,8 @@ class BrowserCaptchaService:
         self._standby_bucket_last_used: Dict[str, float] = {}
         self._standby_lock = asyncio.Lock()
         self._standby_refill_tasks: Dict[str, asyncio.Task] = {}
+        self._standby_live_tasks: Dict[str, asyncio.Task] = {}
+        self._standby_live_lock = asyncio.Lock()
         self._foreground_solves_inflight = 0
         
         # Metrics
@@ -3679,6 +3680,49 @@ class BrowserCaptchaService:
             browser_epoch=browser.get_browser_epoch(),
         )
 
+    async def _coalesce_live_bucket_acquire(
+        self,
+        bucket_key: str,
+        acquire_live: Callable[[], Awaitable[TokenAcquireResult]],
+    ) -> TokenAcquireResult:
+        """同一个 bucket 同时只允许一个前台请求现场产 token，其他请求等待后复查池子。"""
+        if not self._standby_pool_enabled():
+            return await acquire_live()
+
+        while True:
+            owner = False
+            async with self._standby_live_lock:
+                task = self._standby_live_tasks.get(bucket_key)
+                if task is None or task.done():
+                    task = asyncio.create_task(acquire_live())
+                    self._standby_live_tasks[bucket_key] = task
+                    owner = True
+
+            if owner:
+                try:
+                    return await task
+                finally:
+                    async with self._standby_live_lock:
+                        if self._standby_live_tasks.get(bucket_key) is task:
+                            self._standby_live_tasks.pop(bucket_key, None)
+
+            task_error: Optional[Exception] = None
+            try:
+                await task
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                task_error = exc
+
+            # 让 owner 有机会先挂起补池任务，等待方优先复查 standby。
+            await asyncio.sleep(0)
+            standby_result = await self._take_standby_token(bucket_key)
+            if standby_result and standby_result.token:
+                return standby_result
+            if task_error is not None:
+                raise task_error
+            await asyncio.sleep(0)
+
     async def _schedule_standby_refill(
         self,
         bucket_key: str,
@@ -3730,9 +3774,13 @@ class BrowserCaptchaService:
         try:
             refill_wait_seconds = self._standby_refill_wait_seconds()
             next_preferred_browser_id = preferred_browser_id
+            first_round = True
 
             for _ in range(self._standby_refill_retry_rounds()):
-                await asyncio.sleep(refill_wait_seconds)
+                if first_round:
+                    first_round = False
+                else:
+                    await asyncio.sleep(refill_wait_seconds)
 
                 now_value = time.monotonic()
                 async with self._standby_lock:
@@ -3859,9 +3907,13 @@ class BrowserCaptchaService:
         try:
             refill_wait_seconds = self._standby_refill_wait_seconds()
             next_preferred_browser_id = preferred_browser_id
+            first_round = True
 
             for _ in range(self._standby_refill_retry_rounds()):
-                await asyncio.sleep(refill_wait_seconds)
+                if first_round:
+                    first_round = False
+                else:
+                    await asyncio.sleep(refill_wait_seconds)
 
                 now_value = time.monotonic()
                 async with self._standby_lock:
@@ -3962,19 +4014,24 @@ class BrowserCaptchaService:
 
         self._foreground_solves_inflight += 1
         try:
-            if self._token_semaphore:
-                async with self._token_semaphore:
-                    live_result = await self._acquire_live_token(
-                        project_id=project_id,
-                        action=action,
-                        token_proxy_url=token_proxy_url,
-                    )
-            else:
-                live_result = await self._acquire_live_token(
+            async def acquire_live() -> TokenAcquireResult:
+                if self._token_semaphore:
+                    async with self._token_semaphore:
+                        return await self._acquire_live_token(
+                            project_id=project_id,
+                            action=action,
+                            token_proxy_url=token_proxy_url,
+                        )
+                return await self._acquire_live_token(
                     project_id=project_id,
                     action=action,
                     token_proxy_url=token_proxy_url,
                 )
+
+            live_result = await self._coalesce_live_bucket_acquire(
+                bucket_key=bucket_key,
+                acquire_live=acquire_live,
+            )
         finally:
             self._foreground_solves_inflight = max(0, self._foreground_solves_inflight - 1)
 
@@ -4041,20 +4098,20 @@ class BrowserCaptchaService:
 
         self._foreground_solves_inflight += 1
         try:
-            if self._token_semaphore:
-                async with self._token_semaphore:
-                    live_result = await self._acquire_live_custom_token(
-                        website_url=website_url,
-                        website_key=website_key,
-                        action=action,
-                        enterprise=enterprise,
-                        captcha_type=captcha_type,
-                        is_invisible=is_invisible,
-                        token_proxy_url=token_proxy_url,
-                        custom_slot_key=custom_slot_key,
-                    )
-            else:
-                live_result = await self._acquire_live_custom_token(
+            async def acquire_live() -> TokenAcquireResult:
+                if self._token_semaphore:
+                    async with self._token_semaphore:
+                        return await self._acquire_live_custom_token(
+                            website_url=website_url,
+                            website_key=website_key,
+                            action=action,
+                            enterprise=enterprise,
+                            captcha_type=captcha_type,
+                            is_invisible=is_invisible,
+                            token_proxy_url=token_proxy_url,
+                            custom_slot_key=custom_slot_key,
+                        )
+                return await self._acquire_live_custom_token(
                     website_url=website_url,
                     website_key=website_key,
                     action=action,
@@ -4064,6 +4121,11 @@ class BrowserCaptchaService:
                     token_proxy_url=token_proxy_url,
                     custom_slot_key=custom_slot_key,
                 )
+
+            live_result = await self._coalesce_live_bucket_acquire(
+                bucket_key=bucket_key,
+                acquire_live=acquire_live,
+            )
         finally:
             self._foreground_solves_inflight = max(0, self._foreground_solves_inflight - 1)
 
@@ -4217,11 +4279,24 @@ class BrowserCaptchaService:
             self._standby_tokens.clear()
             self._standby_bucket_last_used.clear()
 
+        async with self._standby_live_lock:
+            live_tasks = list(self._standby_live_tasks.values())
+            self._standby_live_tasks.clear()
+
         async with self._project_slot_lock:
             self._project_slot_affinity.clear()
             self._project_slot_last_used.clear()
 
         for task in refill_tasks:
+            if not task or task.done():
+                continue
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        for task in live_tasks:
             if not task or task.done():
                 continue
             task.cancel()

@@ -1,8 +1,10 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import re
+import ssl
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -29,6 +31,9 @@ class ClusterManager:
         self._dispatch_lock = asyncio.Lock()
         # 记录短时调度预留槽位，用于覆盖“心跳上报滞后”窗口，避免瞬时超发。
         self._dispatch_reservations: Dict[int, List[float]] = {}
+        # 记录 bucket -> node 的短期调度亲和，尽量把同类请求稳定发往同一子节点。
+        self._dispatch_bucket_affinity: Dict[str, int] = {}
+        self._dispatch_bucket_last_used: Dict[str, float] = {}
         # 主节点本地维护的“已派发但未结束”路由会话，用于幂等回收 active_sessions。
         self._active_routed_sessions: Dict[str, int] = {}
         self._completed_routed_sessions: Dict[str, float] = {}
@@ -52,16 +57,129 @@ class ClusterManager:
     def _dispatch_poll_interval_seconds() -> float:
         return 0.35
 
+    def _dispatch_bucket_affinity_ttl_seconds(self) -> float:
+        stale_seconds = max(10, int(config.cluster_master_node_stale_seconds))
+        return float(max(300, stale_seconds * 6))
+
+    @staticmethod
+    def _normalize_dispatch_bucket_key(bucket_key: Optional[str]) -> str:
+        return str(bucket_key or "").strip()
+
+    @staticmethod
+    def _is_non_retryable_dispatch_error(error: Exception) -> bool:
+        text = str(error or "").strip().lower()
+        if not text:
+            return False
+
+        fatal_markers = (
+            "certificate verify failed",
+            "hostname mismatch",
+            "wrong version number",
+            "tlsv1 alert",
+            "sslv3 alert",
+            "[ssl:",
+            " ssl:",
+            " tls:",
+            "ssl eof",
+            "tls handshake",
+        )
+        return any(marker in text for marker in fatal_markers)
+
+    @staticmethod
+    def _should_retry_without_tls_verify(url: str, error: Exception) -> bool:
+        parsed = urllib.parse.urlparse(str(url or "").strip())
+        if parsed.scheme.lower() != "https":
+            return False
+        return ClusterManager._is_non_retryable_dispatch_error(error)
+
+    @staticmethod
+    def _normalize_solve_action(action: Any) -> str:
+        return str(action or "IMAGE_GENERATION").strip().upper() or "IMAGE_GENERATION"
+
+    def _build_solve_dispatch_bucket_key(self, request_payload: Dict[str, Any]) -> str:
+        payload = request_payload or {}
+        project_id = str(payload.get("project_id") or "").strip()
+        action = self._normalize_solve_action(payload.get("action"))
+        token_id = int(payload.get("token_id") or 0)
+        token_signature = f"token:{token_id}" if token_id > 0 else "token:default"
+        return f"solve|{project_id}|{action}|{token_signature}"
+
+    def _build_custom_dispatch_bucket_key(self, request_payload: Dict[str, Any], *, prefix: str = "custom") -> str:
+        payload = request_payload or {}
+        joined = "\n".join(
+            [
+                str(payload.get("website_url") or "").strip(),
+                str(payload.get("website_key") or "").strip(),
+                str(payload.get("action") or "homepage").strip(),
+                str(payload.get("captcha_type") or "recaptcha_v3").strip().lower(),
+                "1" if bool(payload.get("enterprise")) else "0",
+                "1" if bool(payload.get("is_invisible", True)) else "0",
+            ]
+        )
+        digest = hashlib.sha1(joined.encode("utf-8")).hexdigest()[:24]
+        return f"{prefix}|{digest}"
+
+    def _prune_dispatch_bucket_affinity_locked(self, *, valid_node_ids: Optional[set[int]] = None):
+        if not self._dispatch_bucket_affinity:
+            return
+
+        now_ts = time.time()
+        expire_before = now_ts - self._dispatch_bucket_affinity_ttl_seconds()
+        stale_keys = [
+            bucket_key
+            for bucket_key, last_used in self._dispatch_bucket_last_used.items()
+            if float(last_used or 0.0) < expire_before
+        ]
+        for bucket_key in stale_keys:
+            self._dispatch_bucket_affinity.pop(bucket_key, None)
+            self._dispatch_bucket_last_used.pop(bucket_key, None)
+
+        if valid_node_ids is None:
+            return
+
+        invalid_keys = [
+            bucket_key
+            for bucket_key, node_id in self._dispatch_bucket_affinity.items()
+            if int(node_id or 0) not in valid_node_ids
+        ]
+        for bucket_key in invalid_keys:
+            self._dispatch_bucket_affinity.pop(bucket_key, None)
+            self._dispatch_bucket_last_used.pop(bucket_key, None)
+
+    async def _mark_bucket_affinity(self, bucket_key: Optional[str], node_id: int):
+        normalized = self._normalize_dispatch_bucket_key(bucket_key)
+        if not normalized or node_id <= 0:
+            return
+
+        async with self._dispatch_lock:
+            self._prune_dispatch_bucket_affinity_locked()
+            self._dispatch_bucket_affinity[normalized] = int(node_id)
+            self._dispatch_bucket_last_used[normalized] = time.time()
+
+    async def _clear_bucket_affinity(self, bucket_key: Optional[str], *, expected_node_id: int = 0):
+        normalized = self._normalize_dispatch_bucket_key(bucket_key)
+        if not normalized:
+            return
+
+        async with self._dispatch_lock:
+            current_node_id = int(self._dispatch_bucket_affinity.get(normalized, 0) or 0)
+            if expected_node_id > 0 and current_node_id not in {0, int(expected_node_id)}:
+                return
+            self._dispatch_bucket_affinity.pop(normalized, None)
+            self._dispatch_bucket_last_used.pop(normalized, None)
+
     async def dispatch_solve(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         last_error = ""
+        bucket_key = self._build_solve_dispatch_bucket_key(request_payload)
 
         while True:
-            nodes = await self._select_candidate_nodes()
+            nodes = await self._select_candidate_nodes(bucket_key=bucket_key)
             if not nodes:
                 await asyncio.sleep(self._dispatch_poll_interval_seconds())
                 continue
 
             dispatched_this_round = False
+            fatal_error: Optional[Exception] = None
             for node in nodes:
                 reserved = await self._try_reserve_dispatch_slot(node)
                 if not reserved:
@@ -92,18 +210,24 @@ class ClusterManager:
                             debug_logger.log_warning(
                                 f"[ClusterManager] adjust active_sessions(+1) failed node={node.get('node_name')}: {e}"
                             )
+                    await self._mark_bucket_affinity(bucket_key, node_id)
 
                     result["session_id"] = routed_session_id
                     result["node_name"] = node["node_name"]
                     return result
                 except Exception as e:
                     await self._release_dispatch_slot(node_id)
+                    await self._clear_bucket_affinity(bucket_key, expected_node_id=node_id)
                     last_error = str(e)
+                    if fatal_error is None and self._is_non_retryable_dispatch_error(e):
+                        fatal_error = e
                     await self.db.mark_cluster_node_error(int(node["id"]), last_error, error_type="dispatch")
                     debug_logger.log_warning(
                         f"[ClusterManager] dispatch solve node={node['node_name']} {diag_label(e)} failed: {last_error}"
                     )
 
+            if fatal_error is not None:
+                raise RuntimeError(f"子节点调度失败: {fatal_error}") from fatal_error
             if dispatched_this_round and last_error:
                 debug_logger.log_warning(
                     f"[ClusterManager] dispatch solve round failed, will retry: {last_error}"
@@ -176,6 +300,7 @@ class ClusterManager:
                 continue
 
             dispatched_this_round = False
+            fatal_error: Optional[Exception] = None
             for node in nodes:
                 reserved = await self._try_reserve_dispatch_slot(node)
                 if not reserved:
@@ -195,11 +320,15 @@ class ClusterManager:
                 except Exception as e:
                     await self._release_dispatch_slot(node_id)
                     last_error = str(e)
+                    if fatal_error is None and self._is_non_retryable_dispatch_error(e):
+                        fatal_error = e
                     await self.db.mark_cluster_node_error(int(node["id"]), last_error, error_type="dispatch")
                     debug_logger.log_warning(
                         f"[ClusterManager] dispatch custom-score node={node['node_name']} {diag_label(e)} failed: {last_error}"
                     )
 
+            if fatal_error is not None:
+                raise RuntimeError(f"子节点调度失败: {fatal_error}") from fatal_error
             if dispatched_this_round and last_error:
                 debug_logger.log_warning(
                     f"[ClusterManager] dispatch custom-score round failed, will retry: {last_error}"
@@ -208,14 +337,16 @@ class ClusterManager:
 
     async def dispatch_custom_token(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         last_error = ""
+        bucket_key = self._build_custom_dispatch_bucket_key(request_payload, prefix="custom")
 
         while True:
-            nodes = await self._select_candidate_nodes()
+            nodes = await self._select_candidate_nodes(bucket_key=bucket_key)
             if not nodes:
                 await asyncio.sleep(self._dispatch_poll_interval_seconds())
                 continue
 
             dispatched_this_round = False
+            fatal_error: Optional[Exception] = None
             for node in nodes:
                 reserved = await self._try_reserve_dispatch_slot(node)
                 if not reserved:
@@ -231,15 +362,21 @@ class ClusterManager:
                         timeout=config.cluster_master_dispatch_timeout_seconds,
                     )
                     await self._release_dispatch_slot(node_id)
+                    await self._mark_bucket_affinity(bucket_key, node_id)
                     return result
                 except Exception as e:
                     await self._release_dispatch_slot(node_id)
+                    await self._clear_bucket_affinity(bucket_key, expected_node_id=node_id)
                     last_error = str(e)
+                    if fatal_error is None and self._is_non_retryable_dispatch_error(e):
+                        fatal_error = e
                     await self.db.mark_cluster_node_error(int(node["id"]), last_error, error_type="dispatch")
                     debug_logger.log_warning(
                         f"[ClusterManager] dispatch custom-token node={node['node_name']} {diag_label(e)} failed: {last_error}"
                     )
 
+            if fatal_error is not None:
+                raise RuntimeError(f"子节点调度失败: {fatal_error}") from fatal_error
             if dispatched_this_round and last_error:
                 debug_logger.log_warning(
                     f"[ClusterManager] dispatch custom-token round failed, will retry: {last_error}"
@@ -355,7 +492,7 @@ class ClusterManager:
 
         return node, child_session
 
-    async def _select_candidate_nodes(self) -> List[Dict[str, Any]]:
+    async def _select_candidate_nodes(self, *, bucket_key: Optional[str] = None) -> List[Dict[str, Any]]:
         nodes = await self.db.get_available_cluster_nodes(config.cluster_master_node_stale_seconds)
         if not nodes:
             return []
@@ -382,6 +519,10 @@ class ClusterManager:
 
         async with self._dispatch_lock:
             self._prune_dispatch_reservations_locked()
+            valid_node_ids = {int(node.get("id") or 0) for node in filtered_nodes if int(node.get("id") or 0) > 0}
+            self._prune_dispatch_bucket_affinity_locked(valid_node_ids=valid_node_ids)
+            normalized_bucket_key = self._normalize_dispatch_bucket_key(bucket_key)
+            preferred_node_id = int(self._dispatch_bucket_affinity.get(normalized_bucket_key, 0) or 0)
 
             decorated: List[Dict[str, Any]] = []
             for node in filtered_nodes:
@@ -425,6 +566,19 @@ class ClusterManager:
                 ordered_idle.append(node)
                 if len(ordered_idle) >= len(with_idle):
                     break
+
+            if preferred_node_id > 0:
+                preferred_index = next(
+                    (
+                        index
+                        for index, node in enumerate(ordered_idle)
+                        if int(node.get("id") or 0) == preferred_node_id
+                    ),
+                    None,
+                )
+                if isinstance(preferred_index, int) and preferred_index > 0:
+                    preferred_node = ordered_idle.pop(preferred_index)
+                    ordered_idle.insert(0, preferred_node)
 
             return ordered_idle
 
@@ -725,15 +879,31 @@ class ClusterManager:
             method=(method or "GET").upper(),
         )
 
+        def execute_request(*, insecure_tls: bool = False) -> tuple[int, bytes]:
+            open_kwargs: Dict[str, Any] = {"timeout": timeout}
+            if insecure_tls:
+                open_kwargs["context"] = ssl._create_unverified_context()
+            with urllib.request.urlopen(request, **open_kwargs) as response:
+                return int(response.getcode() or 0), response.read()
+
         try:
-            with urllib.request.urlopen(request, timeout=timeout) as response:
-                status_code = int(response.getcode() or 0)
-                raw_body = response.read()
+            status_code, raw_body = execute_request()
         except urllib.error.HTTPError as e:
             status_code = int(getattr(e, "code", 500))
             raw_body = e.read() if hasattr(e, "read") else b""
         except Exception as e:
-            raise RuntimeError(f"HTTP 请求失败: {e}") from e
+            if not ClusterManager._should_retry_without_tls_verify(url, e):
+                raise RuntimeError(f"HTTP 请求失败: {e}") from e
+            debug_logger.log_warning(
+                f"[ClusterManager] HTTPS 证书校验失败，改用非校验模式重试内部节点通信: {url}"
+            )
+            try:
+                status_code, raw_body = execute_request(insecure_tls=True)
+            except urllib.error.HTTPError as retry_error:
+                status_code = int(getattr(retry_error, "code", 500))
+                raw_body = retry_error.read() if hasattr(retry_error, "read") else b""
+            except Exception as retry_error:
+                raise RuntimeError(f"HTTP 请求失败: {retry_error}") from retry_error
 
         text = raw_body.decode("utf-8", errors="replace") if raw_body else ""
         parsed: Optional[Any] = None

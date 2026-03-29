@@ -41,6 +41,9 @@ def classify_issue(error: Any) -> str:
     if "cluster key" in text or "api key" in text or "unauthorized" in text or "forbidden" in text or "认证" in text:
         return "auth"
 
+    if "certificate verify failed" in text or "[ssl:" in text or " tls:" in text or "hostname mismatch" in text:
+        return "network_tls"
+
     if "timed out" in text or "timeout" in text:
         if "session_timeout" in text or "finish:timeout" in text:
             return "session_timeout"

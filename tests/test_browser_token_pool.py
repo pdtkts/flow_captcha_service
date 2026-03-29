@@ -1,3 +1,4 @@
+import asyncio
 import time
 import unittest
 from types import SimpleNamespace
@@ -294,20 +295,137 @@ class BrowserTokenPoolTests(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(service, "_check_available"):
             with patch.object(service, "_resolve_global_proxy_url", AsyncMock(return_value=None)):
-                with patch.object(service, "_select_browser_id", AsyncMock(return_value=2)) as select_mock:
-                    with patch.object(service, "_get_next_browser_id", side_effect=AssertionError("should not use round robin")):
-                        with patch.object(service, "_get_or_create_browser", AsyncMock(return_value=fake_browser)):
-                            result = await service.get_custom_token(
-                                website_url="https://example.com/login",
-                                website_key="site-key",
-                                action="login",
-                                captcha_type="recaptcha_v3",
-                            )
+                with patch.object(service, "_schedule_custom_standby_refill", AsyncMock()):
+                    with patch.object(service, "_select_browser_id", AsyncMock(return_value=2)) as select_mock:
+                        with patch.object(service, "_get_next_browser_id", side_effect=AssertionError("should not use round robin")):
+                            with patch.object(service, "_get_or_create_browser", AsyncMock(return_value=fake_browser)):
+                                result = await service.get_custom_token(
+                                    website_url="https://example.com/login",
+                                    website_key="site-key",
+                                    action="login",
+                                    captcha_type="recaptcha_v3",
+                                )
 
         self.assertEqual(result.token, "service-token")
         self.assertEqual(result.browser_id, 2)
         self.assertEqual(result.fingerprint, {"user_agent": "fake-agent"})
         select_mock.assert_awaited_once()
+
+    async def test_same_bucket_concurrent_get_token_serializes_live_acquire(self):
+        service = BrowserCaptchaService()
+        first_live_started = asyncio.Event()
+        release_live = asyncio.Event()
+        state = {"inflight": 0, "max_inflight": 0, "call_count": 0}
+
+        async def fake_acquire_live_token(*args, **kwargs):
+            state["call_count"] += 1
+            state["inflight"] += 1
+            state["max_inflight"] = max(state["max_inflight"], state["inflight"])
+            first_live_started.set()
+            try:
+                await release_live.wait()
+                return SimpleNamespace(
+                    token=f"live-token-{state['call_count']}",
+                    browser_id=1,
+                    browser_ref=1,
+                    fingerprint={"user_agent": "ua-live"},
+                    source="live",
+                    elapsed_ms=0,
+                    browser_epoch=3,
+                )
+            finally:
+                state["inflight"] -= 1
+
+        with patch.object(service, "_check_available"):
+            with patch.object(service, "_resolve_effective_proxy_url", AsyncMock(return_value=None)):
+                with patch.object(service, "_schedule_standby_refill", AsyncMock()):
+                    with patch.object(
+                        service,
+                        "_acquire_live_token",
+                        AsyncMock(side_effect=fake_acquire_live_token),
+                    ) as acquire_mock:
+                        first_task = asyncio.create_task(
+                            service.get_token(project_id="project-a", action="IMAGE_GENERATION")
+                        )
+                        await first_live_started.wait()
+                        second_task = asyncio.create_task(
+                            service.get_token(project_id="project-a", action="IMAGE_GENERATION")
+                        )
+                        await asyncio.sleep(0.01)
+                        self.assertFalse(first_task.done())
+                        self.assertFalse(second_task.done())
+
+                        release_live.set()
+                        first_result, second_result = await asyncio.gather(first_task, second_task)
+
+        self.assertEqual(state["max_inflight"], 1)
+        self.assertGreaterEqual(acquire_mock.await_count, 1)
+        self.assertTrue(bool(first_result.token))
+        self.assertTrue(bool(second_result.token))
+        self.assertEqual(service._standby_live_tasks, {})
+
+    async def test_same_bucket_concurrent_get_custom_token_serializes_live_acquire(self):
+        service = BrowserCaptchaService()
+        first_live_started = asyncio.Event()
+        release_live = asyncio.Event()
+        state = {"inflight": 0, "max_inflight": 0, "call_count": 0}
+
+        async def fake_acquire_live_custom_token(*args, **kwargs):
+            state["call_count"] += 1
+            state["inflight"] += 1
+            state["max_inflight"] = max(state["max_inflight"], state["inflight"])
+            first_live_started.set()
+            try:
+                await release_live.wait()
+                return SimpleNamespace(
+                    token=f"custom-token-{state['call_count']}",
+                    browser_id=2,
+                    browser_ref=2,
+                    fingerprint={"user_agent": "ua-custom"},
+                    source="live",
+                    elapsed_ms=0,
+                    browser_epoch=5,
+                )
+            finally:
+                state["inflight"] -= 1
+
+        with patch.object(service, "_check_available"):
+            with patch.object(service, "_resolve_global_proxy_url", AsyncMock(return_value=None)):
+                with patch.object(service, "_schedule_custom_standby_refill", AsyncMock()):
+                    with patch.object(
+                        service,
+                        "_acquire_live_custom_token",
+                        AsyncMock(side_effect=fake_acquire_live_custom_token),
+                    ) as acquire_mock:
+                        first_task = asyncio.create_task(
+                            service.get_custom_token(
+                                website_url="https://example.com/login",
+                                website_key="site-key",
+                                action="login",
+                                captcha_type="recaptcha_v3",
+                            )
+                        )
+                        await first_live_started.wait()
+                        second_task = asyncio.create_task(
+                            service.get_custom_token(
+                                website_url="https://example.com/login",
+                                website_key="site-key",
+                                action="login",
+                                captcha_type="recaptcha_v3",
+                            )
+                        )
+                        await asyncio.sleep(0.01)
+                        self.assertFalse(first_task.done())
+                        self.assertFalse(second_task.done())
+
+                        release_live.set()
+                        first_result, second_result = await asyncio.gather(first_task, second_task)
+
+        self.assertEqual(state["max_inflight"], 1)
+        self.assertGreaterEqual(acquire_mock.await_count, 1)
+        self.assertTrue(bool(first_result.token))
+        self.assertTrue(bool(second_result.token))
+        self.assertEqual(service._standby_live_tasks, {})
 
     async def test_refill_prefers_other_idle_browser_when_preferred_busy(self):
         service = BrowserCaptchaService()
