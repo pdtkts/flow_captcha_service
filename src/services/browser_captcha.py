@@ -1312,7 +1312,7 @@ class TokenBrowser:
 
         await page.evaluate(
             """
-                (primaryUrl, secondaryUrl) => {
+                ({ primaryUrl, secondaryUrl }) => {
                     const existing = Array.from(document.scripts || []).some((script) => {
                         const src = script?.src || "";
                         return src.includes('/recaptcha/');
@@ -1330,8 +1330,10 @@ class TokenBrowser:
                     loadScript(0);
                 }
             """,
-            f"{runtime['primary_host']}/{runtime['script_path']}?render={runtime['render_value']}",
-            f"{runtime['secondary_host']}/{runtime['script_path']}?render={runtime['render_value']}",
+            {
+                "primaryUrl": f"{runtime['primary_host']}/{runtime['script_path']}?render={runtime['render_value']}",
+                "secondaryUrl": f"{runtime['secondary_host']}/{runtime['script_path']}?render={runtime['render_value']}",
+            },
         )
 
     async def _prepare_custom_page(

@@ -201,6 +201,34 @@ class BrowserTokenPoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(stale_page.closed)
         self.assertIn("hot", browser._shared_custom_pages)
 
+    async def test_inject_custom_page_scripts_passes_single_argument_object(self):
+        browser = TokenBrowser(52, "tmp/test-custom-page-inject")
+        evaluate_calls = []
+
+        class FakePage:
+            async def evaluate(self, expression, arg=None):
+                evaluate_calls.append((expression, arg))
+
+        runtime = {
+            "is_turnstile": False,
+            "primary_host": "https://www.google.com",
+            "secondary_host": "https://www.recaptcha.net",
+            "script_path": "/recaptcha/api.js",
+            "render_value": "site-key",
+        }
+
+        await browser._inject_custom_page_scripts(FakePage(), runtime)
+
+        self.assertEqual(len(evaluate_calls), 1)
+        _, payload = evaluate_calls[0]
+        self.assertEqual(
+            payload,
+            {
+                "primaryUrl": "https://www.google.com//recaptcha/api.js?render=site-key",
+                "secondaryUrl": "https://www.recaptcha.net//recaptcha/api.js?render=site-key",
+            },
+        )
+
     async def test_user_agent_pool_expanded_by_one_hundred(self):
         expected_total = len(TokenBrowser._BASE_UA_LIST) + TokenBrowser.UA_POOL_EXTRA_COUNT
         self.assertEqual(len(TokenBrowser.UA_LIST), expected_total)
