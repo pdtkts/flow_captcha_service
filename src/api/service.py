@@ -10,7 +10,7 @@ from ..core.config import config
 from ..core.database import Database
 from ..core.diagnostics import diag_label
 from ..core.logger import debug_logger
-from ..core.models import CustomScoreRequest, CustomTokenRequest, ErrorRequest, FinishRequest, SolveRequest, SolveResponse
+from ..core.models import CustomScoreRequest, CustomTokenRequest, ErrorRequest, FinishRequest, PrefillRequest, SolveRequest, SolveResponse
 from ..services.captcha_runtime import CaptchaRuntime
 from ..services.cluster_manager import ClusterManager
 
@@ -157,6 +157,32 @@ async def solve_captcha(
                 portal_api_key_id=portal_api_key_id,
             )
         raise HTTPException(status_code=500, detail=f"打码失败: {e}")
+
+
+@router.post("/prefill")
+async def prefill_solve_pool(
+    request: PrefillRequest,
+    api_key: dict = Depends(verify_service_api_key),
+):
+    if _runtime is None:
+        raise HTTPException(status_code=500, detail="服务未初始化")
+
+    if config.cluster_role == "master":
+        raise HTTPException(status_code=400, detail="master 角色不支持本地 prefill")
+
+    try:
+        payload = await _runtime.prime_solve_pool(
+            project_id=request.project_id,
+            action=request.action,
+            token_id=request.token_id,
+        )
+        return {
+            "success": True,
+            "captcha_method": "remote_browser",
+            **payload,
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"prefill 失败: {e}")
 
 
 @router.post("/sessions/{session_id}/finish")

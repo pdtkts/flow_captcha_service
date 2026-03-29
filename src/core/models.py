@@ -43,6 +43,12 @@ class SolveResponse(BaseModel):
     expires_in_seconds: int = 1200
 
 
+class PrefillRequest(BaseModel):
+    project_id: str = Field(min_length=1)
+    action: str = "IMAGE_GENERATION"
+    token_id: Optional[int] = None
+
+
 class FinishRequest(BaseModel):
     status: str = "success"
 

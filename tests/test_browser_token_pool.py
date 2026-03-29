@@ -60,7 +60,7 @@ class BrowserTokenPoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.fingerprint, {"user_agent": "ua-live"})
         self.assertNotIn(self.bucket_key, self.service._standby_tokens)
 
-    async def test_epoch_mismatch_invalidates_entry(self):
+    async def test_epoch_mismatch_keeps_fresh_entry_usable(self):
         now_value = time.monotonic()
         self.service._standby_tokens[self.bucket_key] = [
             StandbyTokenEntry(
@@ -79,7 +79,8 @@ class BrowserTokenPoolTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.service, "_get_browser_epoch_for_standby", return_value=8):
             result = await self.service._take_standby_token(self.bucket_key)
 
-        self.assertIsNone(result)
+        self.assertIsNotNone(result)
+        self.assertEqual(result.token, "stale-token")
         self.assertNotIn(self.bucket_key, self.service._standby_tokens)
 
     async def test_missing_browser_epoch_keeps_entry_usable(self):
@@ -601,6 +602,14 @@ class BrowserTokenPoolTests(unittest.IsolatedAsyncioTestCase):
                 1800,
             )
 
+    async def test_browser_recaptcha_settle_seconds_allows_zero(self):
+        with patch(
+            "src.services.browser_captcha.config",
+            SimpleNamespace(browser_recaptcha_settle_seconds=0),
+        ):
+            browser = TokenBrowser(10, "tmp/test-settle-zero")
+            self.assertEqual(browser._recaptcha_settle_seconds(), 0.0)
+
     async def test_store_standby_token_compacts_fingerprint(self):
         service = BrowserCaptchaService()
         result = type("Result", (), {})()
@@ -727,6 +736,80 @@ class BrowserTokenPoolTests(unittest.IsolatedAsyncioTestCase):
         acquire_mock.assert_awaited_once()
         self.assertIn(self.bucket_key, service._standby_tokens)
         self.assertEqual(service._standby_tokens[self.bucket_key][0].token, "filled-token")
+
+    async def test_schedule_standby_refill_spawns_parallel_tasks_for_missing_depth(self):
+        service = BrowserCaptchaService()
+        service._browser_count = 4
+        now_value = time.monotonic()
+        service._standby_tokens[self.bucket_key] = [
+            StandbyTokenEntry(
+                token="warm-token",
+                browser_id=0,
+                fingerprint={"user_agent": "ua-live"},
+                browser_epoch=1,
+                project_id="project-a",
+                action="IMAGE_GENERATION",
+                proxy_signature="-",
+                created_monotonic=now_value,
+                expires_monotonic=now_value + 30,
+            )
+        ]
+
+        gate = asyncio.Event()
+        started = 0
+
+        async def fake_refill(*args, **kwargs):
+            nonlocal started
+            started += 1
+            await gate.wait()
+
+        with patch(
+            "src.services.browser_captcha.config",
+            SimpleNamespace(
+                browser_standby_refill_idle_seconds=0.01,
+                browser_standby_token_pool_enabled=True,
+                browser_standby_token_pool_depth=4,
+                browser_standby_token_ttl_seconds=45,
+            ),
+        ):
+            with patch.object(service, "_trim_standby_buckets_locked", return_value=[]):
+                with patch.object(service, "_refill_standby_token", AsyncMock(side_effect=fake_refill)):
+                    await service._schedule_standby_refill(
+                        bucket_key=self.bucket_key,
+                        project_id="project-a",
+                        action="IMAGE_GENERATION",
+                        token_proxy_url=None,
+                        preferred_browser_id=None,
+                    )
+                    await asyncio.sleep(0)
+
+                    async with service._standby_lock:
+                        refill_tasks = set(service._standby_refill_tasks.get(self.bucket_key, set()))
+
+                    self.assertEqual(len(refill_tasks), 3)
+                    self.assertEqual(started, 3)
+
+                    gate.set()
+                    await asyncio.gather(*refill_tasks)
+
+                    async with service._standby_lock:
+                        self.assertEqual(service._get_active_refill_tasks_locked(self.bucket_key), set())
+                        self.assertNotIn(self.bucket_key, service._standby_refill_tasks)
+
+    async def test_claim_idle_browser_id_for_refill_skips_reserved_slots(self):
+        service = BrowserCaptchaService()
+        service._browser_count = 2
+
+        first = await service._claim_idle_browser_id_for_refill("project-a", None)
+        second = await service._claim_idle_browser_id_for_refill("project-a", None)
+
+        self.assertEqual({first, second}, {0, 1})
+
+        await service._release_refill_browser_claim(first)
+        await service._release_refill_browser_claim(second)
+
+        async with service._standby_lock:
+            self.assertEqual(service._standby_refill_browser_claims, set())
 
 
 if __name__ == "__main__":

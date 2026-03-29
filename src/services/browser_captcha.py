@@ -802,6 +802,15 @@ class TokenBrowser:
         except Exception:
             return 12.0
 
+    def _recaptcha_settle_seconds(self) -> float:
+        try:
+            raw_value = getattr(config, "browser_recaptcha_settle_seconds", 3.0)
+            if raw_value is None or raw_value == "":
+                return 3.0
+            return max(0.0, float(raw_value))
+        except Exception:
+            return 3.0
+
     def _request_finish_image_wait_seconds(self, *, flow_timeout: int, upsample_timeout: int) -> int:
         fallback = max(max(flow_timeout, upsample_timeout) + 180, 900)
         try:
@@ -2324,7 +2333,7 @@ class TokenBrowser:
                 stage_timings["clr_wait_ms"] = 0
 
             # 即使 reload/clr 都已返回 200，也额外等待几秒，确保 enterprise 请求链路完全稳定。
-            post_wait_seconds = float(getattr(config, "browser_recaptcha_settle_seconds", 3) or 3)
+            post_wait_seconds = self._recaptcha_settle_seconds()
             if post_wait_seconds > 0:
                 debug_logger.log_info(
                     f"[BrowserCaptcha] Token-{self.token_id} reload/clr 已就绪，额外等待 {post_wait_seconds:.1f}s 后返回 token"
@@ -2619,7 +2628,7 @@ class TokenBrowser:
                     timeout=self._execute_timeout_seconds(fallback=30.0),
                 )
 
-            post_wait_seconds = float(getattr(config, "browser_recaptcha_settle_seconds", 3) or 3)
+            post_wait_seconds = self._recaptcha_settle_seconds()
             if post_wait_seconds > 0:
                 debug_logger.log_info(
                     f"[BrowserCaptcha] Token-{self.token_id} 自定义打码已完成，额外等待 {post_wait_seconds:.1f}s 后返回 token"
@@ -2960,7 +2969,8 @@ class BrowserCaptchaService:
         self._standby_tokens: Dict[str, List[StandbyTokenEntry]] = {}
         self._standby_bucket_last_used: Dict[str, float] = {}
         self._standby_lock = asyncio.Lock()
-        self._standby_refill_tasks: Dict[str, asyncio.Task] = {}
+        self._standby_refill_tasks: Dict[str, Set[asyncio.Task]] = {}
+        self._standby_refill_browser_claims: Set[int] = set()
         self._standby_live_tasks: Dict[str, asyncio.Task] = {}
         self._standby_live_lock = asyncio.Lock()
         self._foreground_solves_inflight = 0
@@ -3203,10 +3213,27 @@ class BrowserCaptchaService:
             self._project_slot_affinity.pop(evict_key, None)
             self._project_slot_last_used.pop(evict_key, None)
 
+    def _get_active_refill_tasks_locked(self, bucket_key: str) -> Set[asyncio.Task]:
+        tasks = {
+            task
+            for task in self._standby_refill_tasks.get(bucket_key, set())
+            if task is not None and not task.done()
+        }
+        if tasks:
+            self._standby_refill_tasks[bucket_key] = tasks
+        else:
+            self._standby_refill_tasks.pop(bucket_key, None)
+        return tasks
+
+    def _pop_refill_tasks_locked(self, bucket_key: str) -> List[asyncio.Task]:
+        tasks = self._standby_refill_tasks.pop(bucket_key, set())
+        return [task for task in tasks if task is not None and not task.done()]
+
     def _trim_standby_buckets_locked(self, *, now_value: Optional[float] = None) -> List[asyncio.Task]:
         current = float(now_value if now_value is not None else time.monotonic())
         idle_ttl = self._standby_bucket_idle_ttl_seconds()
         next_state: Dict[str, List[StandbyTokenEntry]] = {}
+        cancelled_tasks: List[asyncio.Task] = []
 
         for bucket_key, entries in list(self._standby_tokens.items()):
             kept = [entry for entry in entries if self._is_standby_entry_valid(entry, now_monotonic=current)]
@@ -3216,10 +3243,10 @@ class BrowserCaptchaService:
                 next_state[bucket_key] = kept
             else:
                 self._standby_bucket_last_used.pop(bucket_key, None)
+                cancelled_tasks.extend(self._pop_refill_tasks_locked(bucket_key))
 
         self._standby_tokens = next_state
 
-        cancelled_tasks: List[asyncio.Task] = []
         max_buckets = self._standby_bucket_max_count()
         while len(self._standby_tokens) > max_buckets:
             evictable = [
@@ -3231,9 +3258,7 @@ class BrowserCaptchaService:
             evict_key = min(evictable, key=lambda item: item[1])[0]
             self._standby_tokens.pop(evict_key, None)
             self._standby_bucket_last_used.pop(evict_key, None)
-            refill_task = self._standby_refill_tasks.pop(evict_key, None)
-            if refill_task is not None and not refill_task.done():
-                cancelled_tasks.append(refill_task)
+            cancelled_tasks.extend(self._pop_refill_tasks_locked(evict_key))
 
         return cancelled_tasks
 
@@ -3482,18 +3507,19 @@ class BrowserCaptchaService:
         now_value = now_monotonic if now_monotonic is not None else time.monotonic()
         if entry.expires_monotonic <= now_value:
             return False
-        current_epoch = self._get_browser_epoch_for_standby(entry.browser_id)
-        if current_epoch is None:
-            return True
-        return int(current_epoch) == int(entry.browser_epoch)
+        # fresh-browser 模式下每次产 token 都可能旋转浏览器 epoch，
+        # 但已经产好的 token 只要还在 TTL 内就应该允许直接复用。
+        return True
 
     async def _select_idle_browser_id_for_refill(
         self,
         project_id: str,
         preferred_browser_id: Optional[int],
+        excluded_browser_ids: Optional[Set[int]] = None,
     ) -> Optional[int]:
         project_key = str(project_id or "").strip()
         affinity_slots: List[int] = []
+        excluded_slots = set(excluded_browser_ids or set())
         if project_key:
             async with self._project_slot_lock:
                 self._trim_project_affinity_locked()
@@ -3505,6 +3531,8 @@ class BrowserCaptchaService:
 
         async with self._browsers_lock:
             def is_slot_idle(slot_id: int) -> bool:
+                if slot_id in excluded_slots:
+                    return False
                 browser = self._browsers.get(slot_id)
                 return browser is None or not getattr(browser, "is_busy", lambda: False)()
 
@@ -3526,6 +3554,41 @@ class BrowserCaptchaService:
                     return slot_id
 
         return None
+
+    async def _claim_idle_browser_id_for_refill(
+        self,
+        project_id: str,
+        preferred_browser_id: Optional[int],
+    ) -> Optional[int]:
+        attempted: Set[int] = set()
+        max_rounds = max(1, self._browser_count + 1)
+        for _ in range(max_rounds):
+            async with self._standby_lock:
+                excluded = set(self._standby_refill_browser_claims)
+            excluded.update(attempted)
+
+            browser_id = await self._select_idle_browser_id_for_refill(
+                project_id=project_id,
+                preferred_browser_id=preferred_browser_id,
+                excluded_browser_ids=excluded,
+            )
+            if browser_id is None:
+                return None
+
+            async with self._standby_lock:
+                if browser_id in self._standby_refill_browser_claims:
+                    attempted.add(browser_id)
+                    continue
+                self._standby_refill_browser_claims.add(browser_id)
+                return browser_id
+
+        return None
+
+    async def _release_refill_browser_claim(self, browser_id: Optional[int]):
+        if browser_id is None:
+            return
+        async with self._standby_lock:
+            self._standby_refill_browser_claims.discard(int(browser_id))
 
     async def _take_standby_token(self, bucket_key: str) -> Optional[TokenAcquireResult]:
         now_value = time.monotonic()
@@ -3738,27 +3801,29 @@ class BrowserCaptchaService:
 
         async with self._standby_lock:
             cancelled_tasks = self._trim_standby_buckets_locked()
-            existing_task = self._standby_refill_tasks.get(bucket_key)
-            if existing_task and not existing_task.done():
-                for task in cancelled_tasks:
-                    task.cancel()
-                return
             current_depth = len(self._standby_tokens.get(bucket_key, []))
-            if current_depth >= self._standby_pool_depth():
+            active_tasks = self._get_active_refill_tasks_locked(bucket_key)
+            target_depth = self._standby_pool_depth()
+            missing = max(0, target_depth - current_depth - len(active_tasks))
+            if missing <= 0:
                 for task in cancelled_tasks:
                     task.cancel()
                 return
-            task = asyncio.create_task(
-                self._refill_standby_token(
-                    bucket_key=bucket_key,
-                    project_id=project_id,
-                    action=action,
-                    token_proxy_url=token_proxy_url,
-                    preferred_browser_id=preferred_browser_id,
-                    keep_warm=True,
+
+            tasks = set(active_tasks)
+            spawn_count = min(missing, max(1, self._browser_count))
+            for _ in range(spawn_count):
+                task = asyncio.create_task(
+                    self._refill_standby_token(
+                        bucket_key=bucket_key,
+                        project_id=project_id,
+                        action=action,
+                        token_proxy_url=token_proxy_url,
+                        preferred_browser_id=preferred_browser_id,
+                    )
                 )
-            )
-            self._standby_refill_tasks[bucket_key] = task
+                tasks.add(task)
+            self._standby_refill_tasks[bucket_key] = tasks
             self._standby_bucket_last_used[bucket_key] = time.monotonic()
 
         for task in cancelled_tasks:
@@ -3771,8 +3836,8 @@ class BrowserCaptchaService:
         action: str,
         token_proxy_url: Optional[str],
         preferred_browser_id: Optional[int],
-        keep_warm: bool = False,
     ):
+        current_task = asyncio.current_task()
         try:
             refill_wait_seconds = self._standby_refill_wait_seconds()
             next_preferred_browser_id = preferred_browser_id
@@ -3806,19 +3871,22 @@ class BrowserCaptchaService:
                         continue
                     return
 
-                refill_browser_id = await self._select_idle_browser_id_for_refill(
+                refill_browser_id = await self._claim_idle_browser_id_for_refill(
                     project_id=project_id,
                     preferred_browser_id=next_preferred_browser_id,
                 )
                 if refill_browser_id is None:
                     continue
 
-                result = await self._acquire_live_token(
-                    project_id=project_id,
-                    action=action,
-                    token_proxy_url=token_proxy_url,
-                    browser_id=refill_browser_id,
-                )
+                try:
+                    result = await self._acquire_live_token(
+                        project_id=project_id,
+                        action=action,
+                        token_proxy_url=token_proxy_url,
+                        browser_id=refill_browser_id,
+                    )
+                finally:
+                    await self._release_refill_browser_claim(refill_browser_id)
 
                 if not result.token:
                     self._stats["standby_fill_fail"] += 1
@@ -3836,12 +3904,22 @@ class BrowserCaptchaService:
                 debug_logger.log_info(
                     f"[BrowserCaptcha] standby token refilled bucket={bucket_key[:120]} browser={result.browser_id}"
                 )
+                return
         except Exception as e:
             self._stats["standby_fill_fail"] += 1
             debug_logger.log_warning(f"[BrowserCaptcha] standby refill failed bucket={bucket_key[:120]}: {e}")
         finally:
             async with self._standby_lock:
-                self._standby_refill_tasks.pop(bucket_key, None)
+                tasks = self._standby_refill_tasks.get(bucket_key, set())
+                tasks = {
+                    task
+                    for task in tasks
+                    if task is not None and task is not current_task and not task.done()
+                }
+                if tasks:
+                    self._standby_refill_tasks[bucket_key] = tasks
+                else:
+                    self._standby_refill_tasks.pop(bucket_key, None)
 
     async def _schedule_custom_standby_refill(
         self,
@@ -3861,32 +3939,34 @@ class BrowserCaptchaService:
 
         async with self._standby_lock:
             cancelled_tasks = self._trim_standby_buckets_locked()
-            existing_task = self._standby_refill_tasks.get(bucket_key)
-            if existing_task and not existing_task.done():
-                for task in cancelled_tasks:
-                    task.cancel()
-                return
             current_depth = len(self._standby_tokens.get(bucket_key, []))
-            if current_depth >= self._standby_pool_depth():
+            active_tasks = self._get_active_refill_tasks_locked(bucket_key)
+            target_depth = self._standby_pool_depth()
+            missing = max(0, target_depth - current_depth - len(active_tasks))
+            if missing <= 0:
                 for task in cancelled_tasks:
                     task.cancel()
                 return
-            task = asyncio.create_task(
-                self._refill_custom_standby_token(
-                    bucket_key=bucket_key,
-                    custom_slot_key=custom_slot_key,
-                    website_url=website_url,
-                    website_key=website_key,
-                    action=action,
-                    enterprise=enterprise,
-                    captcha_type=captcha_type,
-                    is_invisible=is_invisible,
-                    token_proxy_url=token_proxy_url,
-                    preferred_browser_id=preferred_browser_id,
-                    keep_warm=True,
+
+            tasks = set(active_tasks)
+            spawn_count = min(missing, max(1, self._browser_count))
+            for _ in range(spawn_count):
+                task = asyncio.create_task(
+                    self._refill_custom_standby_token(
+                        bucket_key=bucket_key,
+                        custom_slot_key=custom_slot_key,
+                        website_url=website_url,
+                        website_key=website_key,
+                        action=action,
+                        enterprise=enterprise,
+                        captcha_type=captcha_type,
+                        is_invisible=is_invisible,
+                        token_proxy_url=token_proxy_url,
+                        preferred_browser_id=preferred_browser_id,
+                    )
                 )
-            )
-            self._standby_refill_tasks[bucket_key] = task
+                tasks.add(task)
+            self._standby_refill_tasks[bucket_key] = tasks
             self._standby_bucket_last_used[bucket_key] = time.monotonic()
 
         for task in cancelled_tasks:
@@ -3904,8 +3984,8 @@ class BrowserCaptchaService:
         is_invisible: bool,
         token_proxy_url: Optional[str],
         preferred_browser_id: Optional[int],
-        keep_warm: bool = False,
     ):
+        current_task = asyncio.current_task()
         try:
             refill_wait_seconds = self._standby_refill_wait_seconds()
             next_preferred_browser_id = preferred_browser_id
@@ -3939,24 +4019,27 @@ class BrowserCaptchaService:
                         continue
                     return
 
-                refill_browser_id = await self._select_idle_browser_id_for_refill(
+                refill_browser_id = await self._claim_idle_browser_id_for_refill(
                     project_id=custom_slot_key,
                     preferred_browser_id=next_preferred_browser_id,
                 )
                 if refill_browser_id is None:
                     continue
 
-                result = await self._acquire_live_custom_token(
-                    website_url=website_url,
-                    website_key=website_key,
-                    action=action,
-                    enterprise=enterprise,
-                    captcha_type=captcha_type,
-                    is_invisible=is_invisible,
-                    token_proxy_url=token_proxy_url,
-                    custom_slot_key=custom_slot_key,
-                    browser_id=refill_browser_id,
-                )
+                try:
+                    result = await self._acquire_live_custom_token(
+                        website_url=website_url,
+                        website_key=website_key,
+                        action=action,
+                        enterprise=enterprise,
+                        captcha_type=captcha_type,
+                        is_invisible=is_invisible,
+                        token_proxy_url=token_proxy_url,
+                        custom_slot_key=custom_slot_key,
+                        browser_id=refill_browser_id,
+                    )
+                finally:
+                    await self._release_refill_browser_claim(refill_browser_id)
 
                 if not result.token:
                     self._stats["standby_fill_fail"] += 1
@@ -3974,12 +4057,22 @@ class BrowserCaptchaService:
                 debug_logger.log_info(
                     f"[BrowserCaptcha] custom standby token refilled bucket={bucket_key[:120]} browser={result.browser_id}"
                 )
+                return
         except Exception as e:
             self._stats["standby_fill_fail"] += 1
             debug_logger.log_warning(f"[BrowserCaptcha] custom standby refill failed bucket={bucket_key[:120]}: {e}")
         finally:
             async with self._standby_lock:
-                self._standby_refill_tasks.pop(bucket_key, None)
+                tasks = self._standby_refill_tasks.get(bucket_key, set())
+                tasks = {
+                    task
+                    for task in tasks
+                    if task is not None and task is not current_task and not task.done()
+                }
+                if tasks:
+                    self._standby_refill_tasks[bucket_key] = tasks
+                else:
+                    self._standby_refill_tasks.pop(bucket_key, None)
 
     async def get_token(self, project_id: str, action: str = "IMAGE_GENERATION", token_id: int = None) -> TokenAcquireResult:
         """Get a reCAPTCHA token and recycle the shared browser only after fatal browser errors.
@@ -4151,6 +4244,42 @@ class BrowserCaptchaService:
         self._log_stats()
         return live_result
 
+    async def prime_token_pool(
+        self,
+        project_id: str,
+        action: str = "IMAGE_GENERATION",
+        token_id: int = None,
+    ) -> Dict[str, Any]:
+        """按 bucket 提前补池，便于上游在真正取 token 前就让本地池开始产码。"""
+        self._check_available()
+        token_proxy_url = await self._resolve_effective_proxy_url(token_id)
+        bucket_key = self._build_standby_bucket_key(project_id, action, token_proxy_url)
+        await self._schedule_standby_refill(
+            bucket_key=bucket_key,
+            project_id=project_id,
+            action=action,
+            token_proxy_url=token_proxy_url,
+            preferred_browser_id=None,
+        )
+
+        now_value = time.monotonic()
+        async with self._standby_lock:
+            current_depth = len(
+                [
+                    entry
+                    for entry in self._standby_tokens.get(bucket_key, [])
+                    if self._is_standby_entry_valid(entry, now_monotonic=now_value)
+                ]
+            )
+
+        return {
+            "project_id": project_id,
+            "action": action,
+            "current_depth": current_depth,
+            "target_depth": self._standby_pool_depth(),
+            "pool_enabled": self._standby_pool_enabled(),
+        }
+
     async def get_custom_score(
         self,
         website_url: str,
@@ -4276,8 +4405,14 @@ class BrowserCaptchaService:
                 pass
 
         async with self._standby_lock:
-            refill_tasks = list(self._standby_refill_tasks.values())
+            refill_tasks = [
+                task
+                for tasks in self._standby_refill_tasks.values()
+                for task in tasks
+                if task is not None
+            ]
             self._standby_refill_tasks.clear()
+            self._standby_refill_browser_claims.clear()
             self._standby_tokens.clear()
             self._standby_bucket_last_used.clear()
 

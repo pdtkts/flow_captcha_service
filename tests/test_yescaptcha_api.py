@@ -21,6 +21,7 @@ class FakeRuntime:
         self.custom_token_error = None
         self.custom_token_calls = []
         self.solve_calls = []
+        self.prefill_calls = []
 
     async def solve(self, project_id: str, action: str, token_id: int | None, api_key_id: int):
         self.solve_calls.append(
@@ -66,6 +67,23 @@ class FakeRuntime:
             "token": "yes-token",
             "browser_id": 7,
             "fingerprint": {"userAgent": "fake-agent/1.0"},
+            "node_name": "test-node",
+        }
+
+    async def prime_solve_pool(self, project_id: str, action: str = "IMAGE_GENERATION", token_id: int | None = None):
+        self.prefill_calls.append(
+            {
+                "project_id": project_id,
+                "action": action,
+                "token_id": token_id,
+            }
+        )
+        return {
+            "project_id": project_id,
+            "action": action,
+            "current_depth": 1,
+            "target_depth": 4,
+            "pool_enabled": True,
             "node_name": "test-node",
         }
 
@@ -224,6 +242,20 @@ class YesCaptchaApiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["token"], "legacy-token")
         self.assertEqual(payload["node_name"], "test-node")
         self.assertEqual(len(self.runtime.solve_calls), 1)
+
+    async def test_prefill_route_schedules_local_pool_warmup(self):
+        response = await self.client.post(
+            "/api/v1/prefill",
+            headers={"Authorization": f"Bearer {self.raw_key}"},
+            json={"project_id": "demo-project", "action": "IMAGE_GENERATION"},
+        )
+        payload = response.json()
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["captcha_method"], "remote_browser")
+        self.assertEqual(payload["project_id"], "demo-project")
+        self.assertEqual(payload["target_depth"], 4)
+        self.assertEqual(len(self.runtime.prefill_calls), 1)
 
     async def test_get_balance_reuses_client_key_cache_between_polls(self):
         call_counter = {"total": 0}

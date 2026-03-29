@@ -96,6 +96,21 @@ class CaptchaRuntime:
         payload["node_name"] = config.node_name
         return payload
 
+    async def prime_solve_pool(
+        self,
+        project_id: str,
+        action: str = "IMAGE_GENERATION",
+        token_id: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        service = await self._get_browser_service()
+        payload = await service.prime_token_pool(
+            project_id=project_id,
+            action=action,
+            token_id=token_id,
+        )
+        payload["node_name"] = config.node_name
+        return payload
+
     async def custom_token(
         self,
         website_url: str,
