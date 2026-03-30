@@ -2017,6 +2017,7 @@
             <div class="card"><div class="k">缓存会话</div><div id="statCached" class="v">-</div></div>
             <div class="card"><div class="k">累计任务数</div><div id="statTotal" class="v">-</div></div>
             <div class="card"><div class="k">启用 API Key 数</div><div id="statEnabledKey" class="v">-</div></div>
+            <div class="card"><div id="statStandbyTokenLabel" class="k">当前池 token</div><div id="statStandbyTokenCount" class="v">-</div></div>
             <div class="card"><div id="statThreadTotalLabel" class="k">总线程数</div><div id="statThreadTotal" class="v">-</div></div>
             <div class="card"><div id="statThreadIdleLabel" class="k">空闲线程数</div><div id="statThreadIdle" class="v">-</div></div>
           </div>
@@ -2055,6 +2056,16 @@
             <div class="field"><label>流程超时（秒）</label><input id="cfgFlowTimeout" type="number" min="10" /></div>
             <div class="field"><label>放大超时（秒）</label><input id="cfgUpsampleTimeout" type="number" min="10" /></div>
             <div class="field"><label>会话保留时长（秒）</label><input id="cfgSessionTtl" type="number" min="120" /></div>
+          </div>
+          <div class="grid">
+            <div class="field"><label>自动产码 Website Key</label><input id="cfgFlowWebsiteKey" placeholder="留空时使用 flow2api 默认 website key" /><div class="hint">用于原生 flow token 产码与启动后的自动补池。</div></div>
+            <div class="field"><label>自动产码 Project ID</label><input id="cfgAutoWarmProjectId" placeholder="46a52124-04fa-4db0-99ba-61c240490584" /><div class="hint">原生 flow 自动补池必须使用真实 Flow project id；留空时不会预热原生池。</div></div>
+            <div class="field"><label>自动产码 Action</label><select id="cfgAutoWarmAction"><option value="IMAGE_GENERATION">图片（IMAGE_GENERATION）</option><option value="VIDEO_GENERATION">视频（VIDEO_GENERATION）</option></select><div class="hint">服务启动后会持续补图片和视频池；这里用于指定优先补的原生 action。master 角色仅保存模板，不会在本机执行。</div></div>
+          </div>
+          <div class="grid">
+            <div class="field"><label>Yes/自定义预热 URL</label><input id="cfgAutoWarmWebsiteUrl" placeholder="https://example.com/login" /><div class="hint">填写后，standalone/subnode 启动后会持续补这个 yes/custom 目标的 token 池。</div></div>
+            <div class="field"><label>Yes/自定义预热 Website Key</label><input id="cfgAutoWarmWebsiteKey" placeholder="site key" /></div>
+            <div class="field"><label>Yes/自定义预热 Action</label><input id="cfgAutoWarmCustomAction" placeholder="homepage" /><div class="hint">用于 yes/custom 预热目标；留空时默认使用 homepage。</div></div>
           </div>
           <div class="grid">
             <label class="checkbox-line"><input id="cfgLogStartupClear" type="checkbox" /> 启动后自动清空历史日志</label>
@@ -2103,6 +2114,16 @@
             </div>
           </div>
 
+          <div class="grid">
+            <div class="field"><label>本地打码模式</label><select id="cfgCaptchaMethod"><option value="browser">browser 共享浏览器</option><option value="personal">personal 内置浏览器</option></select><div class="hint">`browser` 使用 Playwright 共享浏览器池；`personal` 使用 nodriver 常驻标签页。</div></div>
+          </div>
+
+          <div id="captchaPersonalBasicFields" class="grid">
+            <div class="field"><label>personal 项目池大小</label><input id="cfgPersonalProjectPoolSize" type="number" min="1" max="50" /><div class="hint">仅影响 personal 模式下项目轮换的默认池大小。</div></div>
+            <div class="field"><label>personal 常驻标签页上限</label><input id="cfgPersonalMaxTabs" type="number" min="1" max="50" /></div>
+            <div class="field"><label>personal 空闲回收秒数</label><input id="cfgPersonalIdleTtl" type="number" min="60" /></div>
+          </div>
+
           <details class="advanced">
             <summary>高级参数（一般不用改）</summary>
             <div class="grid">
@@ -2111,7 +2132,14 @@
               <div class="field"><label>DOM 等待秒数</label><input id="cfgDomWait" type="number" step="0.1" min="1" /></div>
               <div class="field"><label>reCAPTCHA 稳定等待秒数</label><input id="cfgSettle" type="number" step="0.1" min="0" /></div>
             </div>
-            <div class="grid"><div class="field"><label>分数测试预热秒数</label><input id="cfgWarmup" type="number" step="0.1" min="0" /></div></div>
+            <div class="grid">
+              <div class="field"><label>分数测试预热秒数</label><input id="cfgWarmup" type="number" step="0.1" min="0" /></div>
+              <div class="field"><label>分数测试稳定等待秒数</label><input id="cfgScoreTestSettle" type="number" step="0.1" min="0" /><div class="hint">personal 自定义 score-test token 验证前的额外等待。</div></div>
+            </div>
+            <div id="captchaPersonalAdvancedFields" class="grid">
+              <div class="field"><label>personal 重建标签页阈值</label><input id="cfgPersonalRecreateThreshold" type="number" min="1" max="20" /><div class="hint">连续服务端异常达到该次数后，重建当前常驻标签页。</div></div>
+              <div class="field"><label>personal 重启浏览器阈值</label><input id="cfgPersonalRestartThreshold" type="number" min="2" max="20" /><div class="hint">连续服务端异常达到该次数后，直接重启 personal 浏览器。</div></div>
+            </div>
           </details>
 
           <div class="actions"><button id="saveSystemBtn">保存系统配置</button></div>
@@ -2119,10 +2147,14 @@
 
         <section id="runtimeConfigPanel" class="panel hidden">
           <h2>运行时打码配置（数据库）</h2>
-          <p class="panel-desc">仅子节点/单机模式需要。主节点不执行本地浏览器打码，因此不会显示此区块。</p>
+          <p class="panel-desc">仅子节点/单机模式需要。主节点不执行本地浏览器打码，因此不会显示此区块。这里支持直接切换 `browser` / `personal`，并同步保存 `flow2api` 同款 personal 参数。</p>
           <div class="grid">
+            <div class="field"><label>本地打码模式</label><select id="rtCaptchaMethod"><option value="browser">browser 共享浏览器</option><option value="personal">personal 内置浏览器</option></select></div>
             <div class="field"><label>浏览器并发数（browser_count）</label><input id="rtBrowserCount" type="number" min="1" /><div class="hint">建议先从 1 开始，确认稳定后再逐步提高。</div></div>
             <div class="field"><label>浏览器代理池（browser_proxy_url）</label><textarea id="rtProxyUrl" placeholder="支持单条代理，或多条代理池。可用换行、逗号、分号分隔。"></textarea><div id="rtProxyPoolHint" class="hint">当前未配置代理池。</div></div>
+            <div class="field"><label>personal 项目池大小</label><input id="rtPersonalProjectPoolSize" type="number" min="1" max="50" /></div>
+            <div class="field"><label>personal 常驻标签页上限</label><input id="rtPersonalMaxTabs" type="number" min="1" max="50" /></div>
+            <div class="field"><label>personal 空闲回收秒数</label><input id="rtPersonalIdleTtl" type="number" min="60" /></div>
           </div>
           <label class="checkbox-line"><input id="rtProxyEnabled" type="checkbox" /> 启用浏览器代理</label>
           <div class="actions"><button id="saveRuntimeBtn">保存运行时配置</button></div>
@@ -2150,6 +2182,7 @@
             <div class="cluster-kpi"><div class="k">健康节点</div><div id="clusterKpiHealthy" class="v">-</div><div class="s">异常：<span id="clusterKpiUnhealthy">-</span></div></div>
             <div class="cluster-kpi"><div class="k">有效总容量</div><div id="clusterKpiCapacity" class="v">-</div><div class="s">Σ 有效容量</div></div>
             <div class="cluster-kpi"><div class="k">空闲容量</div><div id="clusterKpiIdle" class="v">-</div><div class="s">Σ 空闲线程</div></div>
+            <div class="cluster-kpi"><div class="k">池中 token 总量</div><div id="clusterKpiStandbyTokens" class="v">-</div><div class="s">Σ standby token</div></div>
             <div class="cluster-kpi"><div class="k">平均心跳延迟</div><div id="clusterKpiHeartbeat" class="v">-</div><div class="s">单位：秒</div></div>
           </div>
           <div class="cluster-toolbar">
@@ -2162,7 +2195,7 @@
             <div class="toolbar-note">支持按节点名、对外地址和异常原因筛选，并可直接在表格内维护权重与启用状态。</div>
           </div>
           <div id="clusterResultHint" class="cluster-result">显示 0/0 个节点</div>
-          <div class="table-wrap cluster-wrap"><table class="cluster-table"><thead><tr><th>ID</th><th>节点名</th><th>子节点对外地址</th><th>健康</th><th>启用</th><th>浏览器容量</th><th>节点并发上限</th><th>有效容量</th><th>活跃线程</th><th>空闲线程</th><th>心跳延迟(s)</th><th>异常原因</th><th>权重</th><th>最近心跳</th><th>操作</th></tr></thead><tbody id="clusterNodesTable"></tbody></table></div>
+          <div class="table-wrap cluster-wrap"><table class="cluster-table"><thead><tr><th>ID</th><th>节点名</th><th>子节点对外地址</th><th>健康</th><th>启用</th><th>浏览器容量</th><th>节点并发上限</th><th>有效容量</th><th>池中 token</th><th>活跃线程</th><th>空闲线程</th><th>心跳延迟(s)</th><th>异常原因</th><th>权重</th><th>最近心跳</th><th>操作</th></tr></thead><tbody id="clusterNodesTable"></tbody></table></div>
         </section>
       </div>
 
@@ -2629,6 +2662,13 @@
         }
         for (const s of (Array.isArray(guide.next_steps) ? guide.next_steps : [])) { const li = document.createElement("li"); li.textContent = s; steps.appendChild(li); }
       };
+
+      const syncCaptchaModeFields = () => {
+        const isPersonal = q("cfgCaptchaMethod").value === "personal";
+        q("captchaPersonalBasicFields").classList.toggle("hidden", !isPersonal);
+        q("captchaPersonalAdvancedFields").classList.toggle("hidden", !isPersonal);
+      };
+
       const fillSystemConfig = (cfg = {}) => {
         q("cfgRole").value = cfg.cluster?.role || "standalone";
         q("cfgNodeName").value = cfg.captcha?.node_name || "";
@@ -2651,6 +2691,16 @@
         q("cfgFlowTimeout").value = cfg.captcha?.flow_timeout ?? 300;
         q("cfgUpsampleTimeout").value = cfg.captcha?.upsample_timeout ?? 300;
         q("cfgSessionTtl").value = cfg.captcha?.session_ttl_seconds ?? 1200;
+        q("cfgCaptchaMethod").value = cfg.captcha?.captcha_method || "browser";
+        q("cfgPersonalProjectPoolSize").value = cfg.captcha?.personal_project_pool_size ?? 4;
+        q("cfgPersonalMaxTabs").value = cfg.captcha?.personal_max_resident_tabs ?? 5;
+        q("cfgPersonalIdleTtl").value = cfg.captcha?.personal_idle_tab_ttl_seconds ?? 600;
+        q("cfgFlowWebsiteKey").value = cfg.captcha?.browser_flow_website_key || "";
+        q("cfgAutoWarmProjectId").value = cfg.captcha?.browser_auto_warm_project_id || "";
+        q("cfgAutoWarmAction").value = cfg.captcha?.browser_auto_warmup_action || "IMAGE_GENERATION";
+        q("cfgAutoWarmWebsiteUrl").value = cfg.captcha?.browser_auto_warm_website_url || "";
+        q("cfgAutoWarmWebsiteKey").value = cfg.captcha?.browser_auto_warm_website_key || "";
+        q("cfgAutoWarmCustomAction").value = cfg.captcha?.browser_auto_warm_action || "homepage";
         q("cfgMasterNodeStale").value = cfg.cluster?.master_node_stale_seconds ?? 120;
         q("cfgMasterDispatchTimeout").value = cfg.cluster?.master_dispatch_timeout_seconds ?? 45;
         q("cfgMasterBaseUrl").value = cfg.cluster?.master_base_url || "";
@@ -2665,13 +2715,21 @@
         q("cfgDomWait").value = cfg.captcha?.browser_score_dom_wait_seconds ?? 25;
         q("cfgSettle").value = cfg.captcha?.browser_recaptcha_settle_seconds ?? 3;
         q("cfgWarmup").value = cfg.captcha?.browser_score_test_warmup_seconds ?? 12;
+        q("cfgScoreTestSettle").value = cfg.captcha?.browser_score_test_settle_seconds ?? 2.5;
+        q("cfgPersonalRecreateThreshold").value = cfg.captcha?.browser_personal_recreate_threshold ?? 2;
+        q("cfgPersonalRestartThreshold").value = cfg.captcha?.browser_personal_restart_threshold ?? 3;
+        syncCaptchaModeFields();
         applyRoleLayout(roleOfForm());
       };
 
       const fillRuntimeConfig = (cfg = {}) => {
+        q("rtCaptchaMethod").value = cfg.captcha_method || "browser";
         q("rtBrowserCount").value = cfg.browser_count ?? 1;
         q("rtProxyEnabled").checked = !!cfg.browser_proxy_enabled;
         q("rtProxyUrl").value = cfg.browser_proxy_url || "";
+        q("rtPersonalProjectPoolSize").value = cfg.personal_project_pool_size ?? 4;
+        q("rtPersonalMaxTabs").value = cfg.personal_max_resident_tabs ?? 5;
+        q("rtPersonalIdleTtl").value = cfg.personal_idle_tab_ttl_seconds ?? 600;
         const poolSize = Number(cfg.browser_proxy_pool_size || 0);
         q("rtProxyPoolHint").textContent = poolSize > 0 ? `当前代理池条目：${poolSize}` : "当前未配置代理池。";
       };
@@ -2704,10 +2762,23 @@
             flow_timeout: toInt(q("cfgFlowTimeout").value, 300),
             upsample_timeout: toInt(q("cfgUpsampleTimeout").value, 300),
             session_ttl_seconds: toInt(q("cfgSessionTtl").value, 1200),
+            captcha_method: q("cfgCaptchaMethod").value,
+            personal_project_pool_size: toInt(q("cfgPersonalProjectPoolSize").value, 4),
+            personal_max_resident_tabs: toInt(q("cfgPersonalMaxTabs").value, 5),
+            personal_idle_tab_ttl_seconds: toInt(q("cfgPersonalIdleTtl").value, 600),
+            browser_flow_website_key: q("cfgFlowWebsiteKey").value.trim(),
+            browser_auto_warm_project_id: q("cfgAutoWarmProjectId").value.trim(),
+            browser_auto_warmup_action: q("cfgAutoWarmAction").value,
+            browser_auto_warm_website_url: q("cfgAutoWarmWebsiteUrl").value.trim(),
+            browser_auto_warm_website_key: q("cfgAutoWarmWebsiteKey").value.trim(),
+            browser_auto_warm_action: q("cfgAutoWarmCustomAction").value.trim(),
             browser_launch_background: q("cfgLaunchBg").value === "true",
             browser_score_dom_wait_seconds: toFloat(q("cfgDomWait").value, 25),
             browser_recaptcha_settle_seconds: toFloat(q("cfgSettle").value, 3),
             browser_score_test_warmup_seconds: toFloat(q("cfgWarmup").value, 12),
+            browser_score_test_settle_seconds: toFloat(q("cfgScoreTestSettle").value, 2.5),
+            browser_personal_recreate_threshold: toInt(q("cfgPersonalRecreateThreshold").value, 2),
+            browser_personal_restart_threshold: toInt(q("cfgPersonalRestartThreshold").value, 3),
           },
           log: {
             level: q("cfgLogLevel").value,
@@ -2757,13 +2828,17 @@
         q("statTotal").textContent = String(r.db?.jobs_total ?? "-");
         q("statEnabledKey").textContent = String(r.db?.api_key_enabled_total ?? "-");
         if (state.role === "master") {
+          q("statStandbyTokenLabel").textContent = "集群池 token";
           q("statThreadTotalLabel").textContent = "集群打码线程（solve 有效容量）";
           q("statThreadIdleLabel").textContent = "集群空闲打码线程（solve 有效容量-活跃）";
+          q("statStandbyTokenCount").textContent = String(r.cluster?.total_standby_token_count ?? "-");
           q("statThreadTotal").textContent = String(r.cluster?.total_thread_capacity ?? "-");
           q("statThreadIdle").textContent = String(r.cluster?.total_idle_capacity ?? "-");
         } else {
+          q("statStandbyTokenLabel").textContent = "本机池 token";
           q("statThreadTotalLabel").textContent = "本机打码线程（solve 有效容量）";
           q("statThreadIdleLabel").textContent = "本机空闲打码线程（solve 有效容量-活跃）";
+          q("statStandbyTokenCount").textContent = String(r.runtime?.browser?.standby_token_count ?? "-");
           q("statThreadTotal").textContent = String(r.runtime?.browser?.thread_total ?? "-");
           q("statThreadIdle").textContent = String(r.runtime?.browser?.thread_idle ?? "-");
         }
@@ -2891,6 +2966,7 @@
           ["browser_count", item.browser_count ?? "-"],
           ["node_max_concurrency", item.node_max_concurrency ?? "-"],
           ["effective_capacity", item.effective_capacity ?? "-"],
+          ["当前池 token", item.standby_token_count ?? "-"],
           ["活跃线程", item.thread_active ?? "-"],
           ["空闲线程", item.thread_idle ?? "-"],
         ];
@@ -2996,6 +3072,7 @@
         const unhealthy = Math.max(total - healthy, 0);
         const totalCapacity = list.reduce((sum, x) => sum + toInt(x.effective_capacity ?? x.thread_total, 0), 0);
         const idleCapacity = list.reduce((sum, x) => sum + toInt(x.thread_idle, 0), 0);
+        const standbyTokens = list.reduce((sum, x) => sum + toInt(x.standby_token_count, 0), 0);
         const hbAges = list.map((x) => Number(x.heartbeat_age_seconds)).filter((x) => Number.isFinite(x));
         const avgHeartbeat = hbAges.length ? Math.round(hbAges.reduce((a, b) => a + b, 0) / hbAges.length) : null;
 
@@ -3005,6 +3082,7 @@
         q("clusterKpiUnhealthy").textContent = String(unhealthy);
         q("clusterKpiCapacity").textContent = String(totalCapacity);
         q("clusterKpiIdle").textContent = String(idleCapacity);
+        q("clusterKpiStandbyTokens").textContent = String(standbyTokens);
         q("clusterKpiHeartbeat").textContent = avgHeartbeat === null ? "-" : String(avgHeartbeat);
       };
       const renderClusterNodes = () => {
@@ -3028,7 +3106,7 @@
         b.innerHTML = "";
         if (!filtered.length) {
           const tr = document.createElement("tr");
-          tr.innerHTML = `<td colspan="15" style="text-align:center;color:#64748b;padding:16px 8px">当前筛选条件下无节点</td>`;
+          tr.innerHTML = `<td colspan="16" style="text-align:center;color:#64748b;padding:16px 8px">当前筛选条件下无节点</td>`;
           b.appendChild(tr);
           return;
         }
@@ -3041,12 +3119,13 @@
           const ageClass = resolveHeartbeatBadgeClass(ageNumber);
           const ageText = Number.isFinite(ageNumber) ? String(ageNumber) : "-";
           const effectiveCapacity = it.effective_capacity ?? it.thread_total ?? "-";
+          const standbyTokenCount = it.standby_token_count ?? "-";
           const threadActive = it.thread_active ?? "-";
           const threadIdle = it.thread_idle ?? "-";
           const lastHeartbeatText = esc(it.last_heartbeat_at || "-");
           const lastHeartbeatHtml = lastHeartbeatText === "-" ? "-" : lastHeartbeatText.replace(" ", "<br/>");
           const reasonTitle = esc(it.last_error || it.health_reason || "-");
-          tr.innerHTML = `<td><span class="node-id mono">#${it.id}</span></td><td><div class="node-name">${esc(it.node_name || "-")}</div></td><td class="mono node-url">${esc(it.base_url || "-")}</td><td><span class="status-badge ${healthClass}">${healthText}</span></td><td><input type="checkbox" data-node-id="${it.id}" data-node-key="enabled" ${it.enabled ? "checked" : ""} /></td><td><span class="metric-chip mono">${it.browser_count ?? "-"}</span></td><td><span class="metric-chip mono">${it.node_max_concurrency ?? "-"}</span></td><td><span class="metric-chip strong mono">${effectiveCapacity}</span></td><td><span class="metric-chip active mono">${threadActive}</span></td><td><span class="metric-chip idle mono">${threadIdle}</span></td><td><span class="status-badge ${ageClass}">${ageText}</span></td><td><span class="status-badge ${reasonClass} reason-badge" title="${reasonTitle}">${esc(it.health_reason || "-")}</span></td><td><input class="input-mini mono" data-node-id="${it.id}" data-node-key="weight" value="${it.weight ?? 100}" /></td><td><div class="time-cell">${lastHeartbeatHtml}</div></td><td><div class="cluster-actions"><button class="secondary" data-action="detail-node" data-id="${it.id}">详情</button><button class="secondary" data-action="save-node" data-id="${it.id}">保存</button><button class="warn" data-action="delete-node" data-id="${it.id}">删除</button></div></td>`;
+          tr.innerHTML = `<td><span class="node-id mono">#${it.id}</span></td><td><div class="node-name">${esc(it.node_name || "-")}</div></td><td class="mono node-url">${esc(it.base_url || "-")}</td><td><span class="status-badge ${healthClass}">${healthText}</span></td><td><input type="checkbox" data-node-id="${it.id}" data-node-key="enabled" ${it.enabled ? "checked" : ""} /></td><td><span class="metric-chip mono">${it.browser_count ?? "-"}</span></td><td><span class="metric-chip mono">${it.node_max_concurrency ?? "-"}</span></td><td><span class="metric-chip strong mono">${effectiveCapacity}</span></td><td><span class="metric-chip mono">${standbyTokenCount}</span></td><td><span class="metric-chip active mono">${threadActive}</span></td><td><span class="metric-chip idle mono">${threadIdle}</span></td><td><span class="status-badge ${ageClass}">${ageText}</span></td><td><span class="status-badge ${reasonClass} reason-badge" title="${reasonTitle}">${esc(it.health_reason || "-")}</span></td><td><input class="input-mini mono" data-node-id="${it.id}" data-node-key="weight" value="${it.weight ?? 100}" /></td><td><div class="time-cell">${lastHeartbeatHtml}</div></td><td><div class="cluster-actions"><button class="secondary" data-action="detail-node" data-id="${it.id}">详情</button><button class="secondary" data-action="save-node" data-id="${it.id}">保存</button><button class="warn" data-action="delete-node" data-id="${it.id}">删除</button></div></td>`;
           b.appendChild(tr);
         }
       };
@@ -3155,6 +3234,7 @@
         } catch (err) { showNotice(`清空请求日志失败：${err.message}`, "err"); }
       });
       q("cfgRole").addEventListener("change", () => applyRoleLayout(roleOfForm()));
+      q("cfgCaptchaMethod").addEventListener("change", syncCaptchaModeFields);
       q("dashboardNav").addEventListener("click", (event) => {
         const target = event.target;
         if (!(target instanceof HTMLElement)) return;
@@ -3286,9 +3366,22 @@
         try {
           const enabled = q("rtProxyEnabled").checked; const proxyUrl = q("rtProxyUrl").value.trim();
           if (enabled && !proxyUrl) throw new Error("已启用浏览器代理，但代理地址为空。");
-          await req("/api/admin/captcha-config", { method: "POST", body: { browser_count: toInt(q("rtBrowserCount").value, 1), browser_proxy_enabled: enabled, browser_proxy_url: proxyUrl } });
+          const r = await req("/api/admin/captcha-config", {
+            method: "POST",
+            body: {
+              captcha_method: q("rtCaptchaMethod").value,
+              browser_count: toInt(q("rtBrowserCount").value, 1),
+              browser_proxy_enabled: enabled,
+              browser_proxy_url: proxyUrl,
+              personal_project_pool_size: toInt(q("rtPersonalProjectPoolSize").value, 4),
+              personal_max_resident_tabs: toInt(q("rtPersonalMaxTabs").value, 5),
+              personal_idle_tab_ttl_seconds: toInt(q("rtPersonalIdleTtl").value, 600),
+            }
+          });
+          fillRuntimeConfig(r || {});
+          await loadSystem();
           await loadStats();
-          showNotice("运行时打码配置已保存。", "ok");
+          showNotice(r.message || "运行时打码配置已保存。", "ok");
         } catch (err) { showNotice(`保存运行时配置失败：${err.message}`, "err"); }
       });
 
@@ -3484,6 +3577,7 @@
       loadRevealedApiKeys();
       renderLogsPager();
       setDashboardVisible(false);
+      syncCaptchaModeFields();
       tryRestoreLogin();
     })();
   </script>

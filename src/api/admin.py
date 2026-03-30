@@ -397,12 +397,67 @@ def _sanitize_system_config_updates(payload: Dict[str, Any]) -> Tuple[Dict[str, 
     captcha_cfg = payload.get("captcha")
     if isinstance(captcha_cfg, dict):
         section = {}
+        if "captcha_method" in captcha_cfg:
+            method = str(captcha_cfg.get("captcha_method") or "").strip().lower() or "browser"
+            if method not in {"browser", "personal"}:
+                raise HTTPException(status_code=400, detail="captcha.captcha_method 仅支持 browser/personal")
+            section["captcha_method"] = method
+            changed_keys.append("captcha.captcha_method")
         if "browser_launch_background" in captcha_cfg:
             section["browser_launch_background"] = _as_bool(
                 captcha_cfg.get("browser_launch_background"),
                 "captcha.browser_launch_background",
             )
             changed_keys.append("captcha.browser_launch_background")
+        if "browser_flow_website_key" in captcha_cfg:
+            section["browser_flow_website_key"] = str(captcha_cfg.get("browser_flow_website_key") or "").strip()
+            changed_keys.append("captcha.browser_flow_website_key")
+        if "browser_auto_warm_project_id" in captcha_cfg:
+            section["browser_auto_warm_project_id"] = str(captcha_cfg.get("browser_auto_warm_project_id") or "").strip()
+            changed_keys.append("captcha.browser_auto_warm_project_id")
+        if "browser_auto_warmup_action" in captcha_cfg:
+            auto_action = str(captcha_cfg.get("browser_auto_warmup_action") or "").strip().upper() or "IMAGE_GENERATION"
+            if auto_action not in {"IMAGE_GENERATION", "VIDEO_GENERATION"}:
+                raise HTTPException(
+                    status_code=400,
+                    detail="captcha.browser_auto_warmup_action 仅支持 IMAGE_GENERATION/VIDEO_GENERATION",
+                )
+            section["browser_auto_warmup_action"] = auto_action
+            changed_keys.append("captcha.browser_auto_warmup_action")
+        if "browser_auto_warm_website_url" in captcha_cfg:
+            section["browser_auto_warm_website_url"] = str(captcha_cfg.get("browser_auto_warm_website_url") or "").strip()
+            changed_keys.append("captcha.browser_auto_warm_website_url")
+        if "browser_auto_warm_website_key" in captcha_cfg:
+            section["browser_auto_warm_website_key"] = str(captcha_cfg.get("browser_auto_warm_website_key") or "").strip()
+            changed_keys.append("captcha.browser_auto_warm_website_key")
+        if "browser_auto_warm_action" in captcha_cfg:
+            auto_custom_action = str(captcha_cfg.get("browser_auto_warm_action") or "").strip()
+            section["browser_auto_warm_action"] = auto_custom_action
+            changed_keys.append("captcha.browser_auto_warm_action")
+        if "personal_project_pool_size" in captcha_cfg:
+            section["personal_project_pool_size"] = _as_int(
+                captcha_cfg.get("personal_project_pool_size"),
+                "captcha.personal_project_pool_size",
+                1,
+                50,
+            )
+            changed_keys.append("captcha.personal_project_pool_size")
+        if "personal_max_resident_tabs" in captcha_cfg:
+            section["personal_max_resident_tabs"] = _as_int(
+                captcha_cfg.get("personal_max_resident_tabs"),
+                "captcha.personal_max_resident_tabs",
+                1,
+                50,
+            )
+            changed_keys.append("captcha.personal_max_resident_tabs")
+        if "personal_idle_tab_ttl_seconds" in captcha_cfg:
+            section["personal_idle_tab_ttl_seconds"] = _as_int(
+                captcha_cfg.get("personal_idle_tab_ttl_seconds"),
+                "captcha.personal_idle_tab_ttl_seconds",
+                60,
+                86400,
+            )
+            changed_keys.append("captcha.personal_idle_tab_ttl_seconds")
         if "browser_score_dom_wait_seconds" in captcha_cfg:
             section["browser_score_dom_wait_seconds"] = _as_float(
                 captcha_cfg.get("browser_score_dom_wait_seconds"),
@@ -427,6 +482,30 @@ def _sanitize_system_config_updates(payload: Dict[str, Any]) -> Tuple[Dict[str, 
                 300.0,
             )
             changed_keys.append("captcha.browser_score_test_warmup_seconds")
+        if "browser_score_test_settle_seconds" in captcha_cfg:
+            section["browser_score_test_settle_seconds"] = _as_float(
+                captcha_cfg.get("browser_score_test_settle_seconds"),
+                "captcha.browser_score_test_settle_seconds",
+                0.0,
+                60.0,
+            )
+            changed_keys.append("captcha.browser_score_test_settle_seconds")
+        if "browser_personal_recreate_threshold" in captcha_cfg:
+            section["browser_personal_recreate_threshold"] = _as_int(
+                captcha_cfg.get("browser_personal_recreate_threshold"),
+                "captcha.browser_personal_recreate_threshold",
+                1,
+                20,
+            )
+            changed_keys.append("captcha.browser_personal_recreate_threshold")
+        if "browser_personal_restart_threshold" in captcha_cfg:
+            section["browser_personal_restart_threshold"] = _as_int(
+                captcha_cfg.get("browser_personal_restart_threshold"),
+                "captcha.browser_personal_restart_threshold",
+                2,
+                20,
+            )
+            changed_keys.append("captcha.browser_personal_restart_threshold")
         if "flow_timeout" in captcha_cfg:
             section["flow_timeout"] = _as_int(
                 captcha_cfg.get("flow_timeout"),
@@ -590,6 +669,22 @@ def set_dependencies(db: Database, runtime: CaptchaRuntime, cluster_manager: Clu
     _cluster = cluster_manager
 
 
+async def _sync_runtime_captcha_config_to_db():
+    if _db is None:
+        return
+
+    current = await _db.get_captcha_config()
+    await _db.update_captcha_config(
+        captcha_method=config.captcha_method,
+        browser_proxy_enabled=current.browser_proxy_enabled,
+        browser_proxy_url=current.browser_proxy_url if current.browser_proxy_enabled else None,
+        browser_count=current.browser_count,
+        personal_project_pool_size=config.personal_project_pool_size,
+        personal_max_resident_tabs=config.personal_max_resident_tabs,
+        personal_idle_tab_ttl_seconds=config.personal_idle_tab_ttl_seconds,
+    )
+
+
 @router.post("/login")
 async def admin_login(request: LoginRequest):
     if _db is None:
@@ -671,6 +766,27 @@ async def update_system_config(
     _validate_subnode_fields_before_persist(updates)
     config.update_config_sections(updates)
     await _db.start_periodic_log_cleanup()
+
+    if any(
+        key in {
+            "captcha.captcha_method",
+            "captcha.personal_project_pool_size",
+            "captcha.personal_max_resident_tabs",
+            "captcha.personal_idle_tab_ttl_seconds",
+        }
+        for key in changed_keys
+    ):
+        await _sync_runtime_captcha_config_to_db()
+
+    if (
+        _runtime is not None
+        and "cluster.role" not in changed_keys
+        and any(key.startswith("captcha.") for key in changed_keys)
+    ):
+        try:
+            await _runtime.refresh_browser_warmup_settings()
+        except Exception as exc:
+            debug_logger.log_warning(f"[admin] refresh browser warmup settings failed: {exc}")
 
     if "log.level" in changed_keys:
         debug_logger.refresh_level()
@@ -962,9 +1078,13 @@ async def get_captcha_config(token: str = Depends(verify_admin_token)):
     proxy_pool_size = len(split_browser_proxy_pool(cfg.browser_proxy_url or ""))
     return {
         "success": True,
+        "captcha_method": config.captcha_method,
         "browser_proxy_enabled": cfg.browser_proxy_enabled,
         "browser_proxy_url": cfg.browser_proxy_url or "",
         "browser_count": cfg.browser_count,
+        "personal_project_pool_size": config.personal_project_pool_size,
+        "personal_max_resident_tabs": config.personal_max_resident_tabs,
+        "personal_idle_tab_ttl_seconds": config.personal_idle_tab_ttl_seconds,
         "browser_proxy_pool_size": proxy_pool_size,
     }
 
@@ -985,14 +1105,36 @@ async def update_captcha_config(
         if not is_valid:
             raise HTTPException(status_code=400, detail=message)
 
+    method = str(request.captcha_method or "").strip().lower() or "browser"
+    if method not in {"browser", "personal"}:
+        raise HTTPException(status_code=400, detail="captcha_method 仅支持 browser/personal")
+
+    config.update_config_sections(
+        {
+            "captcha": {
+                "captcha_method": method,
+                "personal_project_pool_size": int(request.personal_project_pool_size),
+                "personal_max_resident_tabs": int(request.personal_max_resident_tabs),
+                "personal_idle_tab_ttl_seconds": int(request.personal_idle_tab_ttl_seconds),
+            }
+        }
+    )
+
     await _db.update_captcha_config(
+        captcha_method=method,
         browser_proxy_enabled=request.browser_proxy_enabled,
         browser_proxy_url=request.browser_proxy_url if request.browser_proxy_enabled else None,
         browser_count=request.browser_count,
+        personal_project_pool_size=request.personal_project_pool_size,
+        personal_max_resident_tabs=request.personal_max_resident_tabs,
+        personal_idle_tab_ttl_seconds=request.personal_idle_tab_ttl_seconds,
     )
     await _runtime.reload_browser_count()
+    await _runtime.refresh_browser_warmup_settings()
 
-    return {"success": True}
+    updated = await get_captcha_config(token=token)
+    updated["message"] = "运行时打码配置已保存并热重载"
+    return updated
 
 
 @router.get("/cluster/config")

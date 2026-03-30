@@ -34,6 +34,7 @@ class ClusterManager:
         # 记录 bucket -> node 的短期调度亲和，尽量把同类请求稳定发往同一子节点。
         self._dispatch_bucket_affinity: Dict[str, int] = {}
         self._dispatch_bucket_last_used: Dict[str, float] = {}
+        self._node_standby_bucket_signatures: Dict[int, set[str]] = {}
         # 主节点本地维护的“已派发但未结束”路由会话，用于幂等回收 active_sessions。
         self._active_routed_sessions: Dict[str, int] = {}
         self._completed_routed_sessions: Dict[str, float] = {}
@@ -52,6 +53,8 @@ class ClusterManager:
             except asyncio.CancelledError:
                 pass
         self._subnode_registered = False
+        async with self._dispatch_lock:
+            self._node_standby_bucket_signatures.clear()
 
     @staticmethod
     def _dispatch_poll_interval_seconds() -> float:
@@ -119,6 +122,23 @@ class ClusterManager:
         digest = hashlib.sha1(joined.encode("utf-8")).hexdigest()[:24]
         return f"{prefix}|{digest}"
 
+    def _build_solve_standby_signature(self, request_payload: Dict[str, Any]) -> str:
+        payload = request_payload or {}
+        project_id = str(payload.get("project_id") or "").strip()
+        action = self._normalize_solve_action(payload.get("action"))
+        return f"native|{project_id}|{action}"
+
+    @staticmethod
+    def _normalize_bucket_signatures(values: Any) -> set[str]:
+        normalized: set[str] = set()
+        if not isinstance(values, list):
+            return normalized
+        for value in values:
+            text = str(value or "").strip()
+            if text:
+                normalized.add(text)
+        return normalized
+
     def _prune_dispatch_bucket_affinity_locked(self, *, valid_node_ids: Optional[set[int]] = None):
         if not self._dispatch_bucket_affinity:
             return
@@ -171,9 +191,10 @@ class ClusterManager:
     async def dispatch_solve(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         last_error = ""
         bucket_key = self._build_solve_dispatch_bucket_key(request_payload)
+        bucket_signature = self._build_solve_standby_signature(request_payload)
 
         while True:
-            nodes = await self._select_candidate_nodes(bucket_key=bucket_key)
+            nodes = await self._select_candidate_nodes(bucket_key=bucket_key, bucket_signature=bucket_signature)
             if not nodes:
                 await asyncio.sleep(self._dispatch_poll_interval_seconds())
                 continue
@@ -338,9 +359,10 @@ class ClusterManager:
     async def dispatch_custom_token(self, request_payload: Dict[str, Any]) -> Dict[str, Any]:
         last_error = ""
         bucket_key = self._build_custom_dispatch_bucket_key(request_payload, prefix="custom")
+        bucket_signature = bucket_key
 
         while True:
-            nodes = await self._select_candidate_nodes(bucket_key=bucket_key)
+            nodes = await self._select_candidate_nodes(bucket_key=bucket_key, bucket_signature=bucket_signature)
             if not nodes:
                 await asyncio.sleep(self._dispatch_poll_interval_seconds())
                 continue
@@ -390,6 +412,8 @@ class ClusterManager:
         )
         reported_browser_count = self._as_positive_int(payload.get("browser_count"), effective_capacity)
         reported_node_max = self._as_positive_int(payload.get("node_max_concurrency"), effective_capacity)
+        standby_token_count = max(0, int(payload.get("standby_token_count") or 0))
+        standby_bucket_signatures = self._normalize_bucket_signatures(payload.get("standby_bucket_signatures"))
 
         try:
             node = await self.db.upsert_cluster_node(
@@ -402,6 +426,7 @@ class ClusterManager:
                 reported_node_max_concurrency=reported_node_max,
                 active_sessions=int(payload.get("active_sessions") or 0),
                 cached_sessions=int(payload.get("cached_sessions") or 0),
+                standby_token_count=standby_token_count,
                 healthy=bool(payload.get("healthy", True)),
             )
         except Exception as e:
@@ -422,6 +447,8 @@ class ClusterManager:
             debug_logger.log_warning(
                 f"[ClusterManager] record register heartbeat failed node={node.get('node_name')} {diag_label(e)}: {e}"
             )
+        async with self._dispatch_lock:
+            self._node_standby_bucket_signatures[int(node["id"])] = standby_bucket_signatures
         return {
             "success": True,
             "node": node,
@@ -435,6 +462,8 @@ class ClusterManager:
         )
         reported_browser_count = self._as_positive_int(payload.get("browser_count"), effective_capacity)
         reported_node_max = self._as_positive_int(payload.get("node_max_concurrency"), effective_capacity)
+        standby_token_count = max(0, int(payload.get("standby_token_count") or 0))
+        standby_bucket_signatures = self._normalize_bucket_signatures(payload.get("standby_bucket_signatures"))
 
         try:
             node = await self.db.heartbeat_cluster_node(
@@ -445,6 +474,7 @@ class ClusterManager:
                 reported_node_max_concurrency=reported_node_max,
                 active_sessions=int(payload.get("active_sessions") or 0),
                 cached_sessions=int(payload.get("cached_sessions") or 0),
+                standby_token_count=standby_token_count,
                 healthy=bool(payload.get("healthy", True)),
             )
         except Exception as e:
@@ -470,6 +500,8 @@ class ClusterManager:
             debug_logger.log_warning(
                 f"[ClusterManager] record heartbeat failed node={node.get('node_name')} {diag_label(e)}: {e}"
             )
+        async with self._dispatch_lock:
+            self._node_standby_bucket_signatures[int(node["id"])] = standby_bucket_signatures
         return {
             "success": True,
             "node": node,
@@ -492,7 +524,12 @@ class ClusterManager:
 
         return node, child_session
 
-    async def _select_candidate_nodes(self, *, bucket_key: Optional[str] = None) -> List[Dict[str, Any]]:
+    async def _select_candidate_nodes(
+        self,
+        *,
+        bucket_key: Optional[str] = None,
+        bucket_signature: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         nodes = await self.db.get_available_cluster_nodes(config.cluster_master_node_stale_seconds)
         if not nodes:
             return []
@@ -521,14 +558,25 @@ class ClusterManager:
             self._prune_dispatch_reservations_locked()
             valid_node_ids = {int(node.get("id") or 0) for node in filtered_nodes if int(node.get("id") or 0) > 0}
             self._prune_dispatch_bucket_affinity_locked(valid_node_ids=valid_node_ids)
+            self._node_standby_bucket_signatures = {
+                node_id: signatures
+                for node_id, signatures in self._node_standby_bucket_signatures.items()
+                if node_id in valid_node_ids
+            }
             normalized_bucket_key = self._normalize_dispatch_bucket_key(bucket_key)
             preferred_node_id = int(self._dispatch_bucket_affinity.get(normalized_bucket_key, 0) or 0)
+            normalized_bucket_signature = str(bucket_signature or "").strip()
 
             decorated: List[Dict[str, Any]] = []
             for node in filtered_nodes:
                 node_id = int(node.get("id") or 0)
                 reserved = len(self._dispatch_reservations.get(node_id, []))
-                decorated.append(self.decorate_node_capacity(node, extra_active=reserved))
+                decorated_node = self.decorate_node_capacity(node, extra_active=reserved)
+                signatures = self._node_standby_bucket_signatures.get(node_id, set())
+                decorated_node["has_bucket_signature_match"] = (
+                    1 if normalized_bucket_signature and normalized_bucket_signature in signatures else 0
+                )
+                decorated.append(decorated_node)
 
             with_idle = [node for node in decorated if int(node.get("thread_idle") or 0) > 0]
             if not with_idle:
@@ -537,7 +585,9 @@ class ClusterManager:
 
             with_idle.sort(
                 key=lambda node: (
+                    -int(node.get("has_bucket_signature_match") or 0),
                     -int(node.get("thread_idle") or 0),
+                    -int(node.get("standby_token_count") or 0),
                     int(node.get("thread_active") or 0),
                     -int(node.get("weight") or 100),
                     int(node.get("id") or 0),
@@ -567,6 +617,7 @@ class ClusterManager:
                 if len(ordered_idle) >= len(with_idle):
                     break
 
+            any_bucket_match = any(int(node.get("has_bucket_signature_match") or 0) > 0 for node in ordered_idle)
             if preferred_node_id > 0:
                 preferred_index = next(
                     (
@@ -576,7 +627,10 @@ class ClusterManager:
                     ),
                     None,
                 )
-                if isinstance(preferred_index, int) and preferred_index > 0:
+                preferred_has_match = False
+                if isinstance(preferred_index, int):
+                    preferred_has_match = int(ordered_idle[preferred_index].get("has_bucket_signature_match") or 0) > 0
+                if isinstance(preferred_index, int) and preferred_index > 0 and (preferred_has_match or not any_bucket_match):
                     preferred_node = ordered_idle.pop(preferred_index)
                     ordered_idle.insert(0, preferred_node)
 
@@ -813,6 +867,7 @@ class ClusterManager:
         decorated["thread_active"] = active
         decorated["thread_idle"] = idle
         decorated["reported_active_sessions"] = reported_active
+        decorated["standby_token_count"] = max(0, int(node.get("standby_token_count") or 0))
         decorated["dispatch_reserved"] = max(0, int(extra_active or 0))
         decorated["heartbeat_age_seconds"] = heartbeat_age_seconds
         decorated["health_reason_code"] = reason_code
@@ -966,8 +1021,12 @@ class ClusterManager:
         cached_sessions = int(runtime_stats.get("cached_sessions") or 0)
         browser_stats = runtime_stats.get("browser") if isinstance(runtime_stats, dict) else {}
         configured_browser_count = 0
+        standby_token_count = 0
+        standby_bucket_signatures: List[str] = []
         if isinstance(browser_stats, dict):
             configured_browser_count = max(0, int(browser_stats.get("configured_browser_count") or 0))
+            standby_token_count = max(0, int(browser_stats.get("standby_token_count") or 0))
+            standby_bucket_signatures = list(browser_stats.get("standby_bucket_signatures") or [])
         configured_browser_count = max(1, configured_browser_count or int(config.browser_count))
         configured_dispatch_limit = max(1, int(config.cluster_node_max_concurrency))
         effective_capacity = max(1, min(configured_browser_count, configured_dispatch_limit))
@@ -989,6 +1048,8 @@ class ClusterManager:
             "effective_capacity": effective_capacity,
             "active_sessions": active_sessions,
             "cached_sessions": cached_sessions,
+            "standby_token_count": standby_token_count,
+            "standby_bucket_signatures": standby_bucket_signatures,
             "healthy": True,
         }
         heartbeat_payload = {
@@ -1000,6 +1061,8 @@ class ClusterManager:
             "effective_capacity": effective_capacity,
             "active_sessions": active_sessions,
             "cached_sessions": cached_sessions,
+            "standby_token_count": standby_token_count,
+            "standby_bucket_signatures": standby_bucket_signatures,
             "healthy": True,
         }
 
@@ -1061,6 +1124,7 @@ class ClusterManager:
         total_thread_capacity = sum(max(0, int(node.get("thread_total") or 0)) for node in nodes)
         total_idle_capacity = sum(max(0, int(node.get("thread_idle") or 0)) for node in nodes)
         total_active_capacity = sum(max(0, int(node.get("thread_active") or 0)) for node in nodes)
+        total_standby_token_count = sum(max(0, int(node.get("standby_token_count") or 0)) for node in nodes)
         healthy_node_count = sum(1 for node in nodes if bool(node.get("healthy")) and bool(node.get("enabled")))
         return {
             "role": config.cluster_role,
@@ -1070,5 +1134,6 @@ class ClusterManager:
             "total_thread_capacity": total_thread_capacity,
             "total_idle_capacity": total_idle_capacity,
             "total_active_capacity": total_active_capacity,
+            "total_standby_token_count": total_standby_token_count,
             "nodes": nodes,
         }

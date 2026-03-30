@@ -64,6 +64,13 @@ def _assert_local_portal_auth_enabled(feature_name: str):
         raise HTTPException(status_code=400, detail=f"当前仅允许 OAuth/OIDC 登录，已关闭：{feature_name}")
 
 
+def _resolve_response_captcha_method() -> str:
+    if config.cluster_role == "master":
+        return "remote_browser"
+    method = str(getattr(config, "captcha_method", "browser") or "").strip().lower()
+    return method if method in {"browser", "personal"} else "browser"
+
+
 def _get_oidc_settings() -> Dict[str, Any]:
     base_url = config.portal_oidc_base_url
     well_known_url = config.portal_oidc_well_known_url
@@ -450,6 +457,7 @@ def _build_runtime_summary(runtime_stats: Dict[str, Any]) -> Dict[str, Any]:
             "total_solve_count": int(browser_stats.get("total_solve_count") or 0),
             "total_error_count": int(browser_stats.get("total_error_count") or 0),
             "risk_403_count": int(browser_stats.get("risk_403_count") or 0),
+            "standby_token_count": int(browser_stats.get("standby_token_count") or 0),
             "thread_total": int(browser_stats.get("thread_total") or 0),
             "thread_active": int(browser_stats.get("thread_active") or 0),
             "thread_idle": int(browser_stats.get("thread_idle") or 0),
@@ -485,6 +493,7 @@ def _build_cluster_summary(cluster_stats: Dict[str, Any]) -> Dict[str, Any]:
                 "thread_idle": int(node.get("thread_idle") or 0),
                 "active_sessions": int(node.get("active_sessions") or 0),
                 "cached_sessions": int(node.get("cached_sessions") or 0),
+                "standby_token_count": int(node.get("standby_token_count") or 0),
                 "heartbeat_age_seconds": node.get("heartbeat_age_seconds"),
                 "weight": int(node.get("weight") or 0),
                 "effective_capacity": int(node.get("effective_capacity") or 0),
@@ -499,6 +508,7 @@ def _build_cluster_summary(cluster_stats: Dict[str, Any]) -> Dict[str, Any]:
         "total_thread_capacity": int(cluster_stats.get("total_thread_capacity") or 0),
         "total_active_capacity": int(cluster_stats.get("total_active_capacity") or 0),
         "total_idle_capacity": int(cluster_stats.get("total_idle_capacity") or 0),
+        "total_standby_token_count": int(cluster_stats.get("total_standby_token_count") or 0),
         "nodes": nodes,
         "message": "仅展示用户侧只读摘要，不包含管理员敏感配置。",
     }
@@ -1251,7 +1261,7 @@ async def portal_user_custom_score(
 
         return {
             "success": bool(payload.get("success", True)),
-            "captcha_method": "remote_browser",
+            "captcha_method": _resolve_response_captcha_method(),
             "node_name": payload.get("node_name", config.node_name),
             "token": token_value,
             "token_elapsed_ms": payload.get("token_elapsed_ms"),

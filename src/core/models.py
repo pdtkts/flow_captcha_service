@@ -9,9 +9,13 @@ from pydantic import BaseModel, Field
 
 class CaptchaConfig(BaseModel):
     id: int = 1
+    captcha_method: str = "browser"
     browser_proxy_enabled: bool = False
     browser_proxy_url: Optional[str] = None
     browser_count: int = 1
+    personal_project_pool_size: int = 4
+    personal_max_resident_tabs: int = 5
+    personal_idle_tab_ttl_seconds: int = 600
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -136,9 +140,13 @@ class UpdateApiKeyRequest(BaseModel):
 
 
 class UpdateCaptchaConfigRequest(BaseModel):
+    captcha_method: str = "browser"
     browser_proxy_enabled: bool = False
     browser_proxy_url: Optional[str] = None
     browser_count: int = Field(default=1, ge=1)
+    personal_project_pool_size: int = Field(default=4, ge=1, le=50)
+    personal_max_resident_tabs: int = Field(default=5, ge=1, le=50)
+    personal_idle_tab_ttl_seconds: int = Field(default=600, ge=60)
 
 
 class UpdateAdminCredentialsRequest(BaseModel):
@@ -168,6 +176,8 @@ class ClusterRegisterRequest(BaseModel):
     effective_capacity: int = Field(default=1, ge=1)
     active_sessions: int = Field(default=0, ge=0)
     cached_sessions: int = Field(default=0, ge=0)
+    standby_token_count: int = Field(default=0, ge=0)
+    standby_bucket_signatures: list[str] = Field(default_factory=list, max_length=256)
     healthy: bool = True
 
 
@@ -180,6 +190,8 @@ class ClusterHeartbeatRequest(BaseModel):
     effective_capacity: int = Field(default=1, ge=1)
     active_sessions: int = Field(default=0, ge=0)
     cached_sessions: int = Field(default=0, ge=0)
+    standby_token_count: int = Field(default=0, ge=0)
+    standby_bucket_signatures: list[str] = Field(default_factory=list, max_length=256)
     healthy: bool = True
 
 

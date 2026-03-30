@@ -252,10 +252,30 @@ class YesCaptchaApiTests(unittest.IsolatedAsyncioTestCase):
         payload = response.json()
         self.assertEqual(response.status_code, 200)
         self.assertTrue(payload["success"])
-        self.assertEqual(payload["captcha_method"], "remote_browser")
+        self.assertEqual(payload["captcha_method"], "browser")
         self.assertEqual(payload["project_id"], "demo-project")
         self.assertEqual(payload["target_depth"], 4)
         self.assertEqual(len(self.runtime.prefill_calls), 1)
+
+    async def test_custom_token_route_returns_local_mode_and_token_payload(self):
+        response = await self.client.post(
+            "/api/v1/custom-token",
+            headers={"Authorization": f"Bearer {self.raw_key}"},
+            json={
+                "website_url": "https://example.com",
+                "website_key": "site-key",
+                "action": "submit",
+                "enterprise": False,
+            },
+        )
+        payload = response.json()
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["captcha_method"], "browser")
+        self.assertEqual(payload["token"], "yes-token")
+        self.assertEqual(payload["browser_id"], 7)
+        self.assertEqual(payload["fingerprint"], {"userAgent": "fake-agent/1.0"})
+        self.assertEqual(len(self.runtime.custom_token_calls), 1)
 
     async def test_get_balance_reuses_client_key_cache_between_polls(self):
         call_counter = {"total": 0}

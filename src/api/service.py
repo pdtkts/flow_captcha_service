@@ -41,6 +41,13 @@ def _resolve_service_request_owner(api_key: dict) -> tuple[Optional[int], Option
     return (service_api_key_id if service_api_key_id > 0 else None), None, None
 
 
+def _resolve_response_captcha_method() -> str:
+    if config.cluster_role == "master":
+        return "remote_browser"
+    method = str(getattr(config, "captcha_method", "browser") or "").strip().lower()
+    return method if method in {"browser", "personal"} else "browser"
+
+
 async def _safe_create_job_log(**kwargs):
     if _db is None:
         return
@@ -178,7 +185,7 @@ async def prefill_solve_pool(
         )
         return {
             "success": True,
-            "captcha_method": "remote_browser",
+            "captcha_method": _resolve_response_captcha_method(),
             **payload,
         }
     except Exception as e:
@@ -333,7 +340,7 @@ async def custom_score(
 
         return {
             "success": bool(payload.get("success", True)),
-            "captcha_method": "remote_browser",
+            "captcha_method": _resolve_response_captcha_method(),
             "node_name": payload.get("node_name", config.node_name),
             "token": token_value,
             "token_elapsed_ms": payload.get("token_elapsed_ms"),
@@ -394,7 +401,7 @@ async def custom_token(
 
         return {
             "success": True,
-            "captcha_method": "remote_browser",
+            "captcha_method": _resolve_response_captcha_method(),
             "node_name": payload.get("node_name", config.node_name),
             "token": payload.get("token"),
             "fingerprint": payload.get("fingerprint"),

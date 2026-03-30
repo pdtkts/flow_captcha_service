@@ -50,7 +50,7 @@ class ClusterManagerDispatchTests(unittest.IsolatedAsyncioTestCase):
                                         timeout=0.2,
                                     )
 
-        select_nodes_mock.assert_awaited_once_with(bucket_key=bucket_key)
+        select_nodes_mock.assert_awaited_once_with(bucket_key=bucket_key, bucket_signature=bucket_key)
         reserve_mock.assert_awaited_once_with(node)
         release_mock.assert_awaited_once_with(7)
         post_mock.assert_awaited_once()

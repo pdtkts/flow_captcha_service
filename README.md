@@ -275,10 +275,35 @@ python -m playwright install --with-deps chromium
 - `FCS_BROWSER_PROXY_ENABLED`
 - `FCS_BROWSER_PROXY_URL`
 - `FCS_BROWSER_LAUNCH_BACKGROUND`
+- `FCS_BROWSER_FINGERPRINT_POOL_EXTRA_COUNT`
+- `FCS_BROWSER_CUSTOM_PAGE_CACHE_MAX_PAGES`
+- `FCS_BROWSER_CUSTOM_PAGE_IDLE_TTL_SECONDS`
+- `FCS_BROWSER_PROJECT_AFFINITY_MAX_KEYS`
+- `FCS_BROWSER_PROJECT_AFFINITY_TTL_SECONDS`
+- `FCS_BROWSER_FLOW_WEBSITE_KEY`
+- `FCS_BROWSER_AUTO_WARM_PROJECT_ID`
+- `FCS_BROWSER_AUTO_WARMUP_ACTION`
 - `FCS_BROWSER_SCORE_DOM_WAIT_SECONDS`
 - `FCS_BROWSER_RECAPTCHA_SETTLE_SECONDS`
+- `FCS_BROWSER_STANDBY_TOKEN_POOL_ENABLED`
+- `FCS_BROWSER_STANDBY_TOKEN_TTL_SECONDS`
+- `FCS_BROWSER_STANDBY_TOKEN_POOL_DEPTH`
+- `FCS_BROWSER_STANDBY_BUCKET_MAX_COUNT`
+- `FCS_BROWSER_STANDBY_BUCKET_IDLE_TTL_SECONDS`
+- `FCS_BROWSER_STANDBY_REFILL_IDLE_SECONDS`
 - `FCS_BROWSER_SCORE_TEST_WARMUP_SECONDS`
 - `FCS_BROWSER_IDLE_TTL_SECONDS`
+- `FCS_BROWSER_RETRY_MAX_ATTEMPTS`
+- `FCS_BROWSER_RETRY_BACKOFF_SECONDS`
+- `FCS_BROWSER_EXECUTE_TIMEOUT_SECONDS`
+- `FCS_BROWSER_RELOAD_WAIT_TIMEOUT_SECONDS`
+- `FCS_BROWSER_CLR_WAIT_TIMEOUT_SECONDS`
+- `FCS_BROWSER_IDLE_REAPER_INTERVAL_SECONDS`
+- `FCS_BROWSER_REQUEST_FINISH_IMAGE_WAIT_SECONDS`
+- `FCS_BROWSER_REQUEST_FINISH_NON_IMAGE_WAIT_SECONDS`
+- `FCS_BROWSER_AUTO_WARM_WEBSITE_URL`
+- `FCS_BROWSER_AUTO_WARM_WEBSITE_KEY`
+- `FCS_BROWSER_AUTO_WARM_ACTION`
 - `FCS_FLOW_TIMEOUT`
 - `FCS_UPSAMPLE_TIMEOUT`
 - `FCS_SESSION_TTL_SECONDS`
@@ -349,6 +374,41 @@ cluster.node_max_concurrency = 0
 
 - 不单独指定固定并发
 - 自动跟随 `browser_count`
+
+### 自动补池与预热
+
+如果你希望 `flow2api` 的 `remote_browser` 模式尽量把“取 token 等待”前移，可以在 `flow_captcha_service` 里直接开启预热：
+
+- `browser_auto_warm_project_id`
+  - 填真实的 Flow `project_id` 后，会持续维护原生 Flow token 池
+- `browser_auto_warmup_action`
+  - 指定原生池优先预热 `IMAGE_GENERATION` 还是 `VIDEO_GENERATION`
+- `browser_auto_warm_website_url` + `browser_auto_warm_website_key`
+  - 填写后，会持续维护自定义/custom 目标的 token 池
+- `browser_auto_warm_action`
+  - 自定义/custom 目标的 action，默认 `homepage`
+- `browser_standby_token_pool_*`
+  - 控制 standby token 池深度、TTL、bucket 回收与补池节奏
+
+示例：
+
+```toml
+[captcha]
+browser_flow_website_key = "6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV"
+browser_auto_warm_project_id = "46a52124-04fa-4db0-99ba-61c240490584"
+browser_auto_warmup_action = "IMAGE_GENERATION"
+browser_standby_token_pool_enabled = true
+browser_standby_token_pool_depth = 2
+browser_auto_warm_website_url = ""
+browser_auto_warm_website_key = ""
+browser_auto_warm_action = "homepage"
+```
+
+说明：
+
+- 原生 Flow 预热必须使用真实 `project_id`
+- 自定义预热适合 `custom-token` / `yescaptcha` 兼容链路的固定目标站点
+- 上面两类预热都留空时，服务仍可正常按需打码，只是不主动补池
 
 ---
 

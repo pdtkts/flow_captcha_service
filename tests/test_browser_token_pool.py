@@ -4,7 +4,14 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from src.services.browser_captcha import BrowserCaptchaService, BrowserProfile, StandbyTokenEntry, TokenBrowser
+from src.services.browser_captcha import (
+    BrowserCaptchaService,
+    BrowserProfile,
+    StandbyTokenEntry,
+    TokenAcquireResult,
+    TokenBrowser,
+    _build_user_agent_pool,
+)
 
 
 class BrowserTokenPoolTests(unittest.IsolatedAsyncioTestCase):
@@ -116,11 +123,7 @@ class BrowserTokenPoolTests(unittest.IsolatedAsyncioTestCase):
             "_open_fresh_browser_context",
             AsyncMock(return_value=(object(), object(), fake_context)),
         ) as open_fresh_browser:
-            with patch.object(
-                browser,
-                "_close_fresh_browser_context",
-                AsyncMock(),
-            ) as close_fresh_browser:
+            with patch.object(browser, "_schedule_background_close") as schedule_close:
                 with patch.object(
                     browser,
                     "_execute_custom_captcha",
@@ -134,9 +137,55 @@ class BrowserTokenPoolTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(token, "shared-custom-token")
         open_fresh_browser.assert_awaited_once()
-        close_fresh_browser.assert_awaited_once()
+        schedule_close.assert_called_once()
+        self.assertEqual(schedule_close.call_args.kwargs["close_wait_seconds"], 3.0)
         execute_mock.assert_awaited_once()
         self.assertFalse(bool(execute_mock.await_args.kwargs["reuse_ready_page"]))
+
+    async def test_get_token_success_reuses_shared_browser_when_defer_requested(self):
+        browser = TokenBrowser(31, "tmp/test-native-close-delay")
+        fake_context = object()
+        fake_result = TokenAcquireResult(
+            token="native-token",
+            browser_ref=None,
+            browser_id=None,
+            fingerprint={"user_agent": "ua-native"},
+            source="live",
+            elapsed_ms=12,
+            browser_epoch=1,
+            timings={},
+        )
+
+        with patch.object(
+            browser,
+            "_get_or_create_shared_browser",
+            AsyncMock(return_value=(object(), object(), fake_context)),
+        ) as get_shared_browser:
+            with patch.object(browser, "_execute_captcha", AsyncMock(return_value=fake_result)):
+                with patch.object(browser, "_defer_browser_close_until_request_done", AsyncMock()) as defer_close:
+                    result = await browser.get_token(
+                        project_id="project-a",
+                        website_key="site-key",
+                        action="IMAGE_GENERATION",
+                        defer_close_until_request_done=True,
+                    )
+
+        self.assertEqual(result.token, "native-token")
+        self.assertEqual(result.browser_ref, 31)
+        self.assertEqual(result.browser_id, 31)
+        get_shared_browser.assert_awaited_once()
+        defer_close.assert_not_awaited()
+
+    async def test_report_request_finished_notifies_pending_request_ref(self):
+        browser = SimpleNamespace(
+            notify_generation_request_finished=AsyncMock(),
+            has_shared_browser=lambda: False,
+        )
+        self.service._browsers[9] = browser
+
+        await self.service.report_request_finished("9:request-xyz")
+
+        browser.notify_generation_request_finished.assert_awaited_once_with(request_ref="request-xyz")
 
     async def test_custom_page_cache_hits_same_site(self):
         browser = TokenBrowser(4, "tmp/test-custom-page-cache")
@@ -202,6 +251,65 @@ class BrowserTokenPoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(stale_page.closed)
         self.assertIn("hot", browser._shared_custom_pages)
 
+    async def test_execute_custom_captcha_waits_for_recaptcha_network_ready(self):
+        browser = TokenBrowser(54, "tmp/test-custom-network-wait")
+
+        class FakePage:
+            def __init__(self):
+                self.closed = False
+
+            async def add_init_script(self, *args, **kwargs):
+                return None
+
+            async def evaluate(self, expression, *args):
+                if "resolve(t)" in str(expression):
+                    return "custom-token"
+                return None
+
+            def on(self, *_args, **_kwargs):
+                return None
+
+            async def close(self):
+                self.closed = True
+
+        class FakeContext:
+            async def new_page(self):
+                return fake_page
+
+        fake_page = FakePage()
+        fake_context = FakeContext()
+        reload_event = asyncio.Event()
+        clr_event = asyncio.Event()
+
+        with patch.object(browser, "_install_custom_page_hook", AsyncMock()) as install_hook_mock:
+            with patch.object(browser, "_prepare_custom_page", AsyncMock()) as prepare_mock:
+                with patch.object(browser, "_capture_page_fingerprint", AsyncMock()) as capture_mock:
+                    with patch.object(browser, "_attach_recaptcha_network_waiters", return_value=(reload_event, clr_event)) as attach_mock:
+                        with patch.object(browser, "_wait_recaptcha_network_ready", AsyncMock(return_value={"reload_wait_ms": 1, "clr_wait_ms": 1})) as wait_mock:
+                            with patch.object(browser, "_recaptcha_settle_seconds", return_value=0.0):
+                                token = await browser._execute_custom_captcha(
+                                    context=fake_context,
+                                    website_url="https://example.com/login",
+                                    website_key="site-key",
+                                    action="login",
+                                    enterprise=False,
+                                    captcha_type="recaptcha_v3",
+                                    is_invisible=True,
+                                    reuse_ready_page=False,
+                                )
+
+        self.assertEqual(token, "custom-token")
+        install_hook_mock.assert_awaited_once()
+        prepare_mock.assert_awaited_once()
+        capture_mock.assert_awaited_once()
+        attach_mock.assert_called_once_with(fake_page, "site-key")
+        wait_mock.assert_awaited_once_with(
+            reload_ok_event=reload_event,
+            clr_ok_event=clr_event,
+            log_prefix=f"[BrowserCaptcha] Token-{browser.token_id} 自定义打码",
+        )
+        self.assertTrue(fake_page.closed)
+
     async def test_inject_custom_page_scripts_passes_single_argument_object(self):
         browser = TokenBrowser(52, "tmp/test-custom-page-inject")
         evaluate_calls = []
@@ -230,12 +338,39 @@ class BrowserTokenPoolTests(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_install_custom_page_hook_passes_single_script(self):
+        browser = TokenBrowser(53, "tmp/test-custom-page-hook")
+        add_init_calls = []
+
+        class FakePage:
+            async def add_init_script(self, script=None, path=None):
+                add_init_calls.append((script, path))
+
+        runtime = {
+            "is_turnstile": False,
+            "primary_host": "https://www.google.com",
+            "secondary_host": "https://www.recaptcha.net",
+            "script_path": "/recaptcha/api.js",
+            "render_value": "site-key",
+        }
+
+        await browser._install_custom_page_hook(FakePage(), runtime)
+
+        self.assertEqual(len(add_init_calls), 1)
+        script, path = add_init_calls[0]
+        self.assertIsNone(path)
+        self.assertIn("https://www.google.com//recaptcha/api.js?render=site-key", script)
+        self.assertIn("https://www.recaptcha.net//recaptcha/api.js?render=site-key", script)
+
     async def test_user_agent_pool_expanded_by_one_hundred(self):
         expected_total = len(TokenBrowser._BASE_UA_LIST) + TokenBrowser.UA_POOL_EXTRA_COUNT
+        expected_compatible_total = sum(
+            1 for user_agent in TokenBrowser.UA_LIST if TokenBrowser._is_windows_chromium_user_agent(user_agent)
+        )
         self.assertEqual(len(TokenBrowser.UA_LIST), expected_total)
         self.assertEqual(len(TokenBrowser.UA_LIST), len(set(TokenBrowser.UA_LIST)))
         browser = TokenBrowser(51, "tmp/test-default-profile-pool")
-        self.assertEqual(len(browser._profile_pool), expected_total)
+        self.assertEqual(len(browser._profile_pool), expected_compatible_total)
 
     async def test_profile_pool_honors_configured_extra_count(self):
         with patch(
@@ -244,7 +379,12 @@ class BrowserTokenPoolTests(unittest.IsolatedAsyncioTestCase):
         ):
             browser = TokenBrowser(6, "tmp/test-profile-pool-extra")
 
-        self.assertEqual(len(browser._profile_pool), len(TokenBrowser._BASE_UA_LIST) + 5)
+        compatible_total = sum(
+            1
+            for user_agent in _build_user_agent_pool(TokenBrowser._BASE_UA_LIST, extra_count=5)
+            if TokenBrowser._is_windows_chromium_user_agent(user_agent)
+        )
+        self.assertEqual(len(browser._profile_pool), compatible_total)
 
     async def test_default_profile_pool_is_reused_across_browsers(self):
         browser_a = TokenBrowser(61, "tmp/test-profile-pool-reuse-a")
@@ -270,7 +410,12 @@ class BrowserTokenPoolTests(unittest.IsolatedAsyncioTestCase):
         ):
             browser = TokenBrowser(6, "tmp/test-profile-pool-zero-extra")
 
-        self.assertEqual(len(browser._profile_pool), len(TokenBrowser._BASE_UA_LIST))
+        compatible_total = sum(
+            1
+            for user_agent in _build_user_agent_pool(TokenBrowser._BASE_UA_LIST, extra_count=0)
+            if TokenBrowser._is_windows_chromium_user_agent(user_agent)
+        )
+        self.assertEqual(len(browser._profile_pool), compatible_total)
 
     async def test_refresh_browser_profile_keeps_mobile_profile_shape(self):
         browser = TokenBrowser(7, "tmp/test-mobile-profile")
@@ -392,6 +537,212 @@ class BrowserTokenPoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(bool(first_result.token))
         self.assertTrue(bool(second_result.token))
         self.assertEqual(service._standby_live_tasks, {})
+
+    async def test_get_token_hits_matching_project_warm_bucket(self):
+        service = BrowserCaptchaService()
+        bucket_key = service._build_standby_bucket_key("project-a", "IMAGE_GENERATION", None)
+
+        with patch.object(service, "_check_available"):
+            with patch.object(service, "_resolve_effective_proxy_url", AsyncMock(return_value=None)):
+                with patch.object(service, "_schedule_standby_refill", AsyncMock()) as refill_mock:
+                    with patch.object(
+                        service,
+                        "_take_standby_token",
+                        AsyncMock(return_value=SimpleNamespace(
+                            token="global-warm-token",
+                            browser_id=4,
+                            browser_ref=4,
+                            fingerprint={"user_agent": "ua-global"},
+                            source="standby",
+                            elapsed_ms=0,
+                            browser_epoch=2,
+                        )),
+                    ):
+                        result = await service.get_token(project_id="project-a", action="IMAGE_GENERATION")
+
+        self.assertEqual(result.token, "global-warm-token")
+        self.assertEqual(result.fingerprint, {"user_agent": "ua-global"})
+        refill_kwargs = refill_mock.await_args.kwargs
+        self.assertEqual(refill_kwargs["bucket_key"], bucket_key)
+        self.assertEqual(refill_kwargs["project_id"], "project-a")
+
+    async def test_select_browser_id_reserves_slots_until_released(self):
+        service = BrowserCaptchaService()
+        service._browser_count = 2
+
+        first = await service._select_browser_id("project-a")
+        second = await service._select_browser_id("project-a")
+
+        self.assertEqual({first, second}, {0, 1})
+        self.assertEqual(service._slot_reservations[first], 1)
+        self.assertEqual(service._slot_reservations[second], 1)
+
+        await service._release_slot_reservation(first)
+        await service._release_slot_reservation(second)
+
+        self.assertEqual(service._slot_reservations, {})
+
+    async def test_live_select_browser_id_prefers_warmed_idle_slot(self):
+        service = BrowserCaptchaService()
+        service._browser_count = 3
+        service._round_robin_index = 0
+
+        class FakeBrowser:
+            def __init__(self, busy=False, warmed=False):
+                self._busy = busy
+                self._warmed = warmed
+
+            def is_busy(self):
+                return self._busy
+
+            def has_shared_browser(self):
+                return self._warmed
+
+        service._browsers = {
+            0: FakeBrowser(busy=False, warmed=False),
+            1: FakeBrowser(busy=False, warmed=True),
+            2: FakeBrowser(busy=True, warmed=True),
+        }
+
+        selected = await service._select_browser_id(
+            "project-a",
+            prefer_warmed_shared=True,
+            use_project_affinity=False,
+        )
+
+        self.assertEqual(selected, 1)
+        self.assertEqual(service._slot_reservations[selected], 1)
+
+    async def test_warmup_browser_slots_starts_native_keep_warm_refill_with_real_project(self):
+        service = BrowserCaptchaService()
+        service._browser_count = 2
+
+        with patch(
+            "src.services.browser_captcha.config",
+            SimpleNamespace(
+                browser_flow_website_key="native-key",
+                browser_auto_warm_project_id="project-auto",
+                browser_auto_warmup_action="IMAGE_GENERATION",
+                browser_auto_warm_website_url="",
+                browser_auto_warm_website_key="",
+                browser_auto_warm_action="homepage",
+                browser_standby_token_pool_enabled=True,
+                browser_standby_token_pool_depth=2,
+                browser_standby_token_ttl_seconds=60,
+            ),
+        ):
+            with patch.object(service, "_get_or_create_browser", AsyncMock(side_effect=[object(), object()])):
+                with patch.object(service, "_ensure_auto_warmup_loop", AsyncMock()) as ensure_auto_warmup_loop:
+                    with patch.object(service, "_resolve_global_proxy_url", AsyncMock(return_value=None)):
+                        with patch.object(service, "_schedule_standby_refill", AsyncMock()) as refill_mock:
+                            with patch.object(service, "_schedule_custom_standby_refill", AsyncMock()) as custom_refill_mock:
+                                await service.warmup_browser_slots()
+
+        ensure_auto_warmup_loop.assert_awaited_once()
+        self.assertEqual(refill_mock.await_count, 2)
+        called_actions = [call.kwargs["action"] for call in refill_mock.await_args_list]
+        self.assertEqual(called_actions, ["IMAGE_GENERATION", "VIDEO_GENERATION"])
+        self.assertTrue(all(call.kwargs["project_id"] == "project-auto" for call in refill_mock.await_args_list))
+        self.assertTrue(all(call.kwargs["keep_warm"] is True for call in refill_mock.await_args_list))
+        custom_refill_mock.assert_not_awaited()
+
+    async def test_warmup_browser_slots_skips_native_keep_warm_without_project_id(self):
+        service = BrowserCaptchaService()
+
+        with patch(
+            "src.services.browser_captcha.config",
+            SimpleNamespace(
+                browser_flow_website_key="native-key",
+                browser_auto_warm_project_id="",
+                browser_auto_warmup_action="IMAGE_GENERATION",
+                browser_auto_warm_website_url="",
+                browser_auto_warm_website_key="",
+                browser_auto_warm_action="homepage",
+                browser_standby_token_pool_enabled=True,
+                browser_standby_token_pool_depth=2,
+                browser_standby_token_ttl_seconds=60,
+            ),
+        ):
+            with patch.object(service, "_get_or_create_browser", AsyncMock(return_value=object())):
+                with patch.object(service, "_ensure_auto_warmup_loop", AsyncMock()):
+                    with patch.object(service, "_resolve_global_proxy_url", AsyncMock(return_value=None)):
+                        with patch.object(service, "_schedule_standby_refill", AsyncMock()) as refill_mock:
+                            with patch.object(service, "_schedule_custom_standby_refill", AsyncMock()):
+                                await service.warmup_browser_slots()
+
+        refill_mock.assert_not_awaited()
+
+    async def test_warmup_browser_slots_schedules_configured_custom_target(self):
+        service = BrowserCaptchaService()
+
+        with patch("src.services.browser_captcha.config", SimpleNamespace(
+            browser_flow_website_key="native-key",
+            browser_auto_warm_project_id="project-auto",
+            browser_auto_warmup_action="IMAGE_GENERATION",
+            browser_auto_warm_website_url="https://example.com/login",
+            browser_auto_warm_website_key="site-key",
+            browser_auto_warm_action="login",
+            browser_standby_token_pool_enabled=True,
+            browser_standby_token_pool_depth=2,
+            browser_standby_token_ttl_seconds=60,
+        )):
+            with patch.object(service, "_get_or_create_browser", AsyncMock(return_value=object())):
+                with patch.object(service, "_ensure_auto_warmup_loop", AsyncMock()):
+                    with patch.object(service, "_resolve_global_proxy_url", AsyncMock(return_value=None)):
+                        with patch.object(service, "_schedule_standby_refill", AsyncMock()):
+                            with patch.object(service, "_schedule_custom_standby_refill", AsyncMock()) as custom_refill_mock:
+                                await service.warmup_browser_slots()
+
+        custom_refill_mock.assert_awaited_once()
+        self.assertEqual(custom_refill_mock.await_args.kwargs["website_url"], "https://example.com/login")
+        self.assertEqual(custom_refill_mock.await_args.kwargs["website_key"], "site-key")
+        self.assertEqual(custom_refill_mock.await_args.kwargs["action"], "login")
+
+    async def test_refresh_warmup_settings_updates_website_key_and_clears_pool_when_changed(self):
+        service = BrowserCaptchaService()
+        service.website_key = "old-site-key"
+        service._warmup_settings_signature = "old-signature"
+
+        with patch(
+            "src.services.browser_captcha.config",
+            SimpleNamespace(
+                browser_flow_website_key="new-site-key",
+                browser_auto_warm_project_id="project-next",
+                browser_auto_warmup_action="VIDEO_GENERATION",
+                browser_auto_warm_website_url="https://example.com/login",
+                browser_auto_warm_website_key="site-key",
+                browser_auto_warm_action="login",
+            ),
+        ):
+            with patch.object(service, "_clear_all_standby_tokens", AsyncMock()) as clear_pool_mock:
+                with patch.object(service, "warmup_browser_slots", AsyncMock()) as warmup_mock:
+                    await service.refresh_warmup_settings()
+
+        self.assertEqual(service.website_key, "new-site-key")
+        clear_pool_mock.assert_awaited_once()
+        warmup_mock.assert_awaited_once()
+
+    async def test_get_stats_exposes_bucket_signatures(self):
+        service = BrowserCaptchaService()
+        now_value = time.monotonic()
+        service._standby_tokens["bucket-a"] = [
+            StandbyTokenEntry(
+                token="warm-token",
+                browser_id=1,
+                fingerprint={"user_agent": "ua-live"},
+                browser_epoch=1,
+                project_id="project-a",
+                action="IMAGE_GENERATION",
+                proxy_signature="-",
+                created_monotonic=now_value,
+                expires_monotonic=now_value + 30,
+                match_signature="custom|bucket-a",
+            )
+        ]
+
+        stats = service.get_stats()
+
+        self.assertEqual(stats["standby_bucket_signatures"], ["custom|bucket-a"])
 
     async def test_same_bucket_concurrent_get_custom_token_serializes_live_acquire(self):
         service = BrowserCaptchaService()
@@ -804,12 +1155,15 @@ class BrowserTokenPoolTests(unittest.IsolatedAsyncioTestCase):
         second = await service._claim_idle_browser_id_for_refill("project-a", None)
 
         self.assertEqual({first, second}, {0, 1})
+        self.assertEqual(service._slot_reservations[first], 1)
+        self.assertEqual(service._slot_reservations[second], 1)
 
         await service._release_refill_browser_claim(first)
         await service._release_refill_browser_claim(second)
 
         async with service._standby_lock:
             self.assertEqual(service._standby_refill_browser_claims, set())
+        self.assertEqual(service._slot_reservations, {})
 
 
 if __name__ == "__main__":

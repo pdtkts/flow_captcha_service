@@ -1,6 +1,8 @@
 ﻿from __future__ import annotations
 
 import asyncio
+import gc
+import sys
 import time
 import uuid
 from typing import Any, Dict, Optional, Tuple
@@ -18,6 +20,8 @@ class CaptchaRuntime:
         self.registry = SessionRegistry()
         self._cleanup_task: Optional[asyncio.Task] = None
         self._browser_service = None
+        self._service_mode: Optional[str] = None
+        self._browser_service_lock = asyncio.Lock()
 
     async def start(self):
         if self._cleanup_task and not self._cleanup_task.done():
@@ -26,19 +30,79 @@ class CaptchaRuntime:
         if config.cluster_role != "master":
             try:
                 service = await self._get_browser_service()
-                await service.warmup_browser_slots()
+                await self._warmup_local_service(service)
             except Exception as e:
                 debug_logger.log_warning(f"[CaptchaRuntime] browser warmup failed: {e}")
+
+    def _resolve_local_captcha_method(self) -> str:
+        return "personal" if str(config.captcha_method or "").strip().lower() == "personal" else "browser"
+
+    async def _close_current_service_locked(self):
+        if self._browser_service is None:
+            self._service_mode = None
+            return
+        try:
+            await self._browser_service.close()
+        except Exception as e:
+            debug_logger.log_warning(f"[CaptchaRuntime] close browser service failed: {e}")
+        finally:
+            self._browser_service = None
+            self._service_mode = None
+
+    async def _close_current_service(self):
+        async with self._browser_service_lock:
+            await self._close_current_service_locked()
+
+    async def _warmup_local_service(self, service):
+        method = self._service_mode or self._resolve_local_captcha_method()
+        if method == "personal":
+            project_id = str(getattr(config, "browser_auto_warm_project_id", "") or "").strip()
+            if not project_id:
+                return
+            warmup_limit = max(1, int(getattr(config, "personal_max_resident_tabs", 1) or 1))
+            if hasattr(service, "warmup_resident_tabs"):
+                await service.warmup_resident_tabs([project_id], limit=warmup_limit)
+            return
+
+        await service.warmup_browser_slots()
 
     async def _get_browser_service(self):
         if config.cluster_role == "master":
             raise RuntimeError("master 角色不执行本地打码")
 
-        if self._browser_service is None:
-            from .browser_captcha import BrowserCaptchaService
+        async with self._browser_service_lock:
+            current_mode = self._resolve_local_captcha_method()
+            if self._browser_service is not None and self._service_mode != current_mode:
+                await self._close_current_service_locked()
 
-            self._browser_service = await BrowserCaptchaService.get_instance(self.db)
-        return self._browser_service
+            if self._browser_service is None:
+                if current_mode == "personal":
+                    from .browser_captcha_personal import BrowserCaptchaService as PersonalCaptchaService
+
+                    self._browser_service = await PersonalCaptchaService.get_instance(self.db)
+                else:
+                    from .browser_captcha import BrowserCaptchaService
+
+                    self._browser_service = await BrowserCaptchaService.get_instance(self.db)
+                self._service_mode = current_mode
+            return self._browser_service
+
+    @staticmethod
+    def _extract_token_response(raw_result: Any, fallback_browser_id: Optional[str] = None) -> Tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]:
+        if raw_result is None:
+            return None, fallback_browser_id, None
+
+        if isinstance(raw_result, str):
+            token = str(raw_result or "").strip() or None
+            return token, fallback_browser_id, None
+
+        token = str(getattr(raw_result, "token", "") or "").strip() or None
+        browser_ref = getattr(raw_result, "browser_ref", None)
+        browser_id = browser_ref if browser_ref is not None else getattr(raw_result, "browser_id", None)
+        if browser_id is None:
+            browser_id = fallback_browser_id
+        fingerprint = getattr(raw_result, "fingerprint", None)
+        return token, browser_id, fingerprint
 
     async def solve(
         self,
@@ -48,16 +112,25 @@ class CaptchaRuntime:
         api_key_id: int,
     ) -> Dict[str, Any]:
         service = await self._get_browser_service()
-        token_result = await service.get_token(project_id, action, token_id=token_id)
-        token = token_result.token if token_result else None
-        browser_id = token_result.browser_ref if token_result else None
+        if self._service_mode == "personal":
+            token_result = await service.get_token(project_id, action)
+            token, browser_id, fingerprint = self._extract_token_response(
+                token_result,
+                fallback_browser_id=project_id,
+            )
+        else:
+            token_result = await service.get_token(project_id, action, token_id=token_id)
+            token, browser_id, fingerprint = self._extract_token_response(token_result)
 
         if not token or browser_id is None:
             raise RuntimeError("有头打码失败，未获取到 token")
 
-        fingerprint = token_result.fingerprint if token_result else None
         if fingerprint is None:
-            fingerprint = await service.get_fingerprint(browser_id)
+            if hasattr(service, "get_fingerprint"):
+                maybe_fingerprint = service.get_fingerprint(browser_id)
+                fingerprint = await maybe_fingerprint if asyncio.iscoroutine(maybe_fingerprint) else maybe_fingerprint
+            elif hasattr(service, "get_last_fingerprint"):
+                fingerprint = service.get_last_fingerprint()
         session_id = str(uuid.uuid4())
         await self.registry.create(
             session_id=session_id,
@@ -84,13 +157,26 @@ class CaptchaRuntime:
         enterprise: bool,
     ) -> Dict[str, Any]:
         service = await self._get_browser_service()
-        payload, browser_id = await service.get_custom_score(
-            website_url=website_url,
-            website_key=website_key,
-            verify_url=verify_url,
-            action=action,
-            enterprise=enterprise,
-        )
+        if self._service_mode == "personal":
+            score_result = await service.get_custom_score(
+                website_url=website_url,
+                website_key=website_key,
+                verify_url=verify_url,
+                action=action,
+                enterprise=enterprise,
+            )
+            if isinstance(score_result, tuple) and len(score_result) == 2:
+                payload, browser_id = score_result
+            else:
+                payload, browser_id = score_result, website_url
+        else:
+            payload, browser_id = await service.get_custom_score(
+                website_url=website_url,
+                website_key=website_key,
+                verify_url=verify_url,
+                action=action,
+                enterprise=enterprise,
+            )
         payload = payload if isinstance(payload, dict) else {}
         payload["browser_id"] = browser_id
         payload["node_name"] = config.node_name
@@ -103,11 +189,30 @@ class CaptchaRuntime:
         token_id: Optional[int] = None,
     ) -> Dict[str, Any]:
         service = await self._get_browser_service()
-        payload = await service.prime_token_pool(
-            project_id=project_id,
-            action=action,
-            token_id=token_id,
-        )
+        if self._service_mode == "personal":
+            if hasattr(service, "prime_token_pool"):
+                payload = await service.prime_token_pool(
+                    project_id=project_id,
+                    action=action,
+                    token_id=token_id,
+                )
+            else:
+                warmed_slots = []
+                if hasattr(service, "warmup_resident_tabs"):
+                    warmed_slots = await service.warmup_resident_tabs([project_id], limit=1)
+                payload = {
+                    "success": True,
+                    "method": "personal",
+                    "project_id": project_id,
+                    "action": action,
+                    "warmed_slots": warmed_slots,
+                }
+        else:
+            payload = await service.prime_token_pool(
+                project_id=project_id,
+                action=action,
+                token_id=token_id,
+            )
         payload["node_name"] = config.node_name
         return payload
 
@@ -121,22 +226,33 @@ class CaptchaRuntime:
         is_invisible: bool = True,
     ) -> Dict[str, Any]:
         service = await self._get_browser_service()
-        token_result = await service.get_custom_token(
-            website_url=website_url,
-            website_key=website_key,
-            action=action,
-            enterprise=enterprise,
-            captcha_type=captcha_type,
-            is_invisible=is_invisible,
-        )
-        token = str(token_result.token or "").strip() if token_result else ""
+        if self._service_mode == "personal":
+            token_result = await service.get_custom_token(
+                website_url=website_url,
+                website_key=website_key,
+                action=action,
+                enterprise=enterprise,
+            )
+            token, browser_id, fingerprint = self._extract_token_response(token_result)
+        else:
+            token_result = await service.get_custom_token(
+                website_url=website_url,
+                website_key=website_key,
+                action=action,
+                enterprise=enterprise,
+                captcha_type=captcha_type,
+                is_invisible=is_invisible,
+            )
+            token, browser_id, fingerprint = self._extract_token_response(token_result)
         if not token:
             raise RuntimeError("通用打码失败，未获取到 token")
 
-        browser_id = token_result.browser_ref if token_result else None
-        fingerprint = token_result.fingerprint if token_result else None
         if fingerprint is None and browser_id is not None:
-            fingerprint = await service.get_fingerprint(browser_id)
+            if hasattr(service, "get_fingerprint"):
+                maybe_fingerprint = service.get_fingerprint(browser_id)
+                fingerprint = await maybe_fingerprint if asyncio.iscoroutine(maybe_fingerprint) else maybe_fingerprint
+        if fingerprint is None and hasattr(service, "get_last_fingerprint"):
+            fingerprint = service.get_last_fingerprint()
         return {
             "token": token,
             "browser_id": browser_id,
@@ -154,7 +270,8 @@ class CaptchaRuntime:
             return True, f"session_already_{entry.status}", entry
 
         service = await self._get_browser_service()
-        await service.report_request_finished(entry.browser_id)
+        if hasattr(service, "report_request_finished"):
+            await service.report_request_finished(entry.browser_id)
         finished_entry = await self.registry.finish(session_id)
         return True, "ok", finished_entry
 
@@ -168,7 +285,10 @@ class CaptchaRuntime:
             return True, f"session_already_{entry.status}", entry
 
         service = await self._get_browser_service()
-        await service.report_error(entry.browser_id, error_reason=error_reason)
+        if self._service_mode == "personal" and hasattr(service, "report_flow_error"):
+            await service.report_flow_error(entry.project_id, error_reason=error_reason, error_message=session_id)
+        elif hasattr(service, "report_error"):
+            await service.report_error(entry.browser_id, error_reason=error_reason)
         error_entry = await self.registry.mark_error(session_id, error_reason)
         return True, "ok", error_entry
 
@@ -178,9 +298,26 @@ class CaptchaRuntime:
         if self._browser_service is None:
             return
         try:
-            await self._browser_service.reload_browser_count()
+            if self._service_mode == "personal" and hasattr(self._browser_service, "reload_config"):
+                await self._browser_service.reload_config()
+            else:
+                await self._browser_service.reload_browser_count()
         except Exception as e:
             debug_logger.log_warning(f"[CaptchaRuntime] reload_browser_count failed: {e}")
+
+    async def refresh_browser_warmup_settings(self):
+        if config.cluster_role == "master":
+            return
+        try:
+            service = await self._get_browser_service()
+            if self._service_mode == "personal":
+                if hasattr(service, "reload_config"):
+                    await service.reload_config()
+                await self._warmup_local_service(service)
+            else:
+                await service.refresh_warmup_settings()
+        except Exception as e:
+            debug_logger.log_warning(f"[CaptchaRuntime] refresh_browser_warmup_settings failed: {e}")
 
     async def get_stats(self) -> Dict[str, Any]:
         pending_sessions = await self.registry.active_count()
@@ -194,22 +331,45 @@ class CaptchaRuntime:
             "configured_browser_count": config.browser_count,
             "busy_browser_count": 0,
             "idle_browser_count": config.browser_count,
+            "standby_token_count": 0,
         }
 
         if self._browser_service is not None:
             try:
-                browser_stats = self._browser_service.get_stats()
+                if hasattr(self._browser_service, "get_stats"):
+                    browser_stats = self._browser_service.get_stats()
+                elif self._service_mode == "personal":
+                    resident_count = 0
+                    if hasattr(self._browser_service, "get_resident_count"):
+                        resident_count = max(0, int(self._browser_service.get_resident_count() or 0))
+                    configured_tabs = max(1, int(config.personal_max_resident_tabs or 1))
+                    browser_stats = {
+                        "mode": "personal",
+                        "total_solve_count": 0,
+                        "total_error_count": 0,
+                        "risk_403_count": 0,
+                        "browser_count": resident_count,
+                        "configured_browser_count": configured_tabs,
+                        "busy_browser_count": 0,
+                        "idle_browser_count": max(configured_tabs - 0, 0),
+                        "standby_token_count": 0,
+                        "shared_browser_count": resident_count,
+                    }
             except Exception as e:
                 debug_logger.log_warning(f"[CaptchaRuntime] get browser stats failed: {e}")
         elif config.cluster_role != "master":
             try:
-                captcha_cfg = await self.db.get_captcha_config()
-                browser_stats["configured_browser_count"] = max(1, int(captcha_cfg.browser_count or 1))
+                if self._resolve_local_captcha_method() == "personal":
+                    browser_stats["configured_browser_count"] = max(1, int(config.personal_max_resident_tabs or 1))
+                else:
+                    captcha_cfg = await self.db.get_captcha_config()
+                    browser_stats["configured_browser_count"] = max(1, int(captcha_cfg.browser_count or 1))
                 browser_stats["idle_browser_count"] = browser_stats["configured_browser_count"]
             except Exception as e:
                 debug_logger.log_warning(f"[CaptchaRuntime] read browser_count from db failed: {e}")
 
-        configured_count = max(1, int(browser_stats.get("configured_browser_count") or config.browser_count or 1))
+        default_configured = config.personal_max_resident_tabs if self._resolve_local_captcha_method() == "personal" else config.browser_count
+        configured_count = max(1, int(browser_stats.get("configured_browser_count") or default_configured or 1))
         busy_count = max(0, int(browser_stats.get("busy_browser_count") or 0))
         browser_stats["thread_total"] = configured_count
         browser_stats["thread_idle"] = max(configured_count - busy_count, 0)
@@ -299,8 +459,8 @@ class CaptchaRuntime:
             except asyncio.CancelledError:
                 pass
 
-        if self._browser_service is not None:
-            try:
-                await self._browser_service.close()
-            except Exception as e:
-                debug_logger.log_warning(f"[CaptchaRuntime] close browser service failed: {e}")
+        await self._close_current_service()
+        if sys.platform.startswith("win"):
+            gc.collect()
+            await asyncio.sleep(0)
+            await asyncio.sleep(0.1)

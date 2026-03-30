@@ -90,12 +90,16 @@ class Config:
         "FCS_DB_PATH",
         "FCS_ADMIN_USERNAME",
         "FCS_ADMIN_PASSWORD",
+        "FCS_CAPTCHA_METHOD",
         "FCS_BROWSER_LAUNCH_BACKGROUND",
         "FCS_BROWSER_FINGERPRINT_POOL_EXTRA_COUNT",
         "FCS_BROWSER_CUSTOM_PAGE_CACHE_MAX_PAGES",
         "FCS_BROWSER_CUSTOM_PAGE_IDLE_TTL_SECONDS",
         "FCS_BROWSER_PROJECT_AFFINITY_MAX_KEYS",
         "FCS_BROWSER_PROJECT_AFFINITY_TTL_SECONDS",
+        "FCS_BROWSER_FLOW_WEBSITE_KEY",
+        "FCS_BROWSER_AUTO_WARM_PROJECT_ID",
+        "FCS_BROWSER_AUTO_WARMUP_ACTION",
         "FCS_BROWSER_SCORE_DOM_WAIT_SECONDS",
         "FCS_BROWSER_RECAPTCHA_SETTLE_SECONDS",
         "FCS_BROWSER_STANDBY_TOKEN_POOL_ENABLED",
@@ -105,6 +109,7 @@ class Config:
         "FCS_BROWSER_STANDBY_BUCKET_IDLE_TTL_SECONDS",
         "FCS_BROWSER_STANDBY_REFILL_IDLE_SECONDS",
         "FCS_BROWSER_SCORE_TEST_WARMUP_SECONDS",
+        "FCS_BROWSER_SCORE_TEST_SETTLE_SECONDS",
         "FCS_BROWSER_IDLE_TTL_SECONDS",
         "FCS_BROWSER_RETRY_MAX_ATTEMPTS",
         "FCS_BROWSER_RETRY_BACKOFF_SECONDS",
@@ -114,6 +119,14 @@ class Config:
         "FCS_BROWSER_IDLE_REAPER_INTERVAL_SECONDS",
         "FCS_BROWSER_REQUEST_FINISH_IMAGE_WAIT_SECONDS",
         "FCS_BROWSER_REQUEST_FINISH_NON_IMAGE_WAIT_SECONDS",
+        "FCS_BROWSER_AUTO_WARM_WEBSITE_URL",
+        "FCS_BROWSER_AUTO_WARM_WEBSITE_KEY",
+        "FCS_BROWSER_AUTO_WARM_ACTION",
+        "FCS_PERSONAL_PROJECT_POOL_SIZE",
+        "FCS_PERSONAL_MAX_RESIDENT_TABS",
+        "FCS_PERSONAL_IDLE_TAB_TTL_SECONDS",
+        "FCS_BROWSER_PERSONAL_RECREATE_THRESHOLD",
+        "FCS_BROWSER_PERSONAL_RESTART_THRESHOLD",
         "FCS_FLOW_TIMEOUT",
         "FCS_UPSAMPLE_TIMEOUT",
         "FCS_SESSION_TTL_SECONDS",
@@ -196,6 +209,7 @@ class Config:
                 "checkin_max_quota": 0,
             },
             "captcha": {
+                "captcha_method": "browser",
                 "browser_count": 1,
                 "browser_proxy_enabled": False,
                 "browser_proxy_url": "",
@@ -205,6 +219,9 @@ class Config:
                 "browser_custom_page_idle_ttl_seconds": 240,
                 "browser_project_affinity_max_keys": 0,
                 "browser_project_affinity_ttl_seconds": 1800,
+                "browser_flow_website_key": "6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV",
+                "browser_auto_warm_project_id": "",
+                "browser_auto_warmup_action": "IMAGE_GENERATION",
                 "browser_score_dom_wait_seconds": 25,
                 "browser_recaptcha_settle_seconds": 0,
                 "browser_standby_token_pool_enabled": True,
@@ -214,6 +231,7 @@ class Config:
                 "browser_standby_bucket_idle_ttl_seconds": 0,
                 "browser_standby_refill_idle_seconds": 0.8,
                 "browser_score_test_warmup_seconds": 12,
+                "browser_score_test_settle_seconds": 2.5,
                 "browser_idle_ttl_seconds": 600,
                 "browser_retry_max_attempts": 3,
                 "browser_retry_backoff_seconds": 1,
@@ -223,6 +241,14 @@ class Config:
                 "browser_idle_reaper_interval_seconds": 15,
                 "browser_request_finish_image_wait_seconds": 0,
                 "browser_request_finish_non_image_wait_seconds": 0,
+                "browser_auto_warm_website_url": "",
+                "browser_auto_warm_website_key": "",
+                "browser_auto_warm_action": "homepage",
+                "personal_project_pool_size": 4,
+                "personal_max_resident_tabs": 5,
+                "personal_idle_tab_ttl_seconds": 600,
+                "browser_personal_recreate_threshold": 2,
+                "browser_personal_restart_threshold": 3,
                 "flow_timeout": 300,
                 "upsample_timeout": 300,
                 "session_ttl_seconds": 1200,
@@ -356,6 +382,16 @@ class Config:
         if value:
             return int(value)
         return int(self._get("server", "port", 8060))
+
+    @property
+    def captcha_method(self) -> str:
+        value = str(
+            os.getenv(
+                "FCS_CAPTCHA_METHOD",
+                self._get("captcha", "captcha_method", "browser"),
+            )
+        ).strip().lower()
+        return value if value in {"browser", "personal"} else "browser"
 
     @property
     def db_path(self) -> Path:
@@ -495,6 +531,39 @@ class Config:
             return 1800.0
 
     @property
+    def browser_flow_website_key(self) -> str:
+        value = os.getenv("FCS_BROWSER_FLOW_WEBSITE_KEY")
+        if value is not None:
+            text = str(value).strip()
+            if text:
+                return text
+        configured = str(
+            self._get("captcha", "browser_flow_website_key", "6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV")
+        ).strip()
+        return configured or "6LdsFiUsAAAAAIjVDZcuLhaHiDn5nnHVXVRQGeMV"
+
+    @property
+    def browser_auto_warmup_action(self) -> str:
+        value = os.getenv("FCS_BROWSER_AUTO_WARMUP_ACTION")
+        if value is not None:
+            candidate = str(value).strip().upper()
+            if candidate in {"IMAGE_GENERATION", "VIDEO_GENERATION"}:
+                return candidate
+        candidate = str(self._get("captcha", "browser_auto_warmup_action", "IMAGE_GENERATION") or "").strip().upper()
+        if candidate in {"IMAGE_GENERATION", "VIDEO_GENERATION"}:
+            return candidate
+        return "IMAGE_GENERATION"
+
+    @property
+    def browser_auto_warm_project_id(self) -> str:
+        return str(
+            os.getenv(
+                "FCS_BROWSER_AUTO_WARM_PROJECT_ID",
+                self._get("captcha", "browser_auto_warm_project_id", ""),
+            )
+        ).strip()
+
+    @property
     def browser_score_dom_wait_seconds(self) -> float:
         value = os.getenv("FCS_BROWSER_SCORE_DOM_WAIT_SECONDS")
         if value:
@@ -591,6 +660,19 @@ class Config:
         if value:
             return float(value)
         return float(self._get("captcha", "browser_score_test_warmup_seconds", 12))
+
+    @property
+    def browser_score_test_settle_seconds(self) -> float:
+        value = os.getenv("FCS_BROWSER_SCORE_TEST_SETTLE_SECONDS")
+        if value:
+            try:
+                return max(0.0, float(value))
+            except Exception:
+                return 2.5
+        try:
+            return max(0.0, float(self._get("captcha", "browser_score_test_settle_seconds", 2.5)))
+        except Exception:
+            return 2.5
 
     @property
     def browser_idle_ttl_seconds(self) -> int:
@@ -709,6 +791,83 @@ class Config:
             0,
             0,
         )
+
+    @property
+    def browser_auto_warm_website_url(self) -> str:
+        return str(
+            os.getenv(
+                "FCS_BROWSER_AUTO_WARM_WEBSITE_URL",
+                self._get("captcha", "browser_auto_warm_website_url", ""),
+            )
+        ).strip()
+
+    @property
+    def browser_auto_warm_website_key(self) -> str:
+        return str(
+            os.getenv(
+                "FCS_BROWSER_AUTO_WARM_WEBSITE_KEY",
+                self._get("captcha", "browser_auto_warm_website_key", ""),
+            )
+        ).strip()
+
+    @property
+    def browser_auto_warm_action(self) -> str:
+        return (
+            str(
+                os.getenv(
+                    "FCS_BROWSER_AUTO_WARM_ACTION",
+                    self._get("captcha", "browser_auto_warm_action", "homepage"),
+                )
+            ).strip()
+            or "homepage"
+        )
+
+    @property
+    def personal_project_pool_size(self) -> int:
+        value = os.getenv("FCS_PERSONAL_PROJECT_POOL_SIZE")
+        if value:
+            return max(1, min(50, int(value)))
+        return max(1, min(50, int(self._get("captcha", "personal_project_pool_size", 4) or 4)))
+
+    @property
+    def personal_max_resident_tabs(self) -> int:
+        value = os.getenv("FCS_PERSONAL_MAX_RESIDENT_TABS")
+        if value:
+            return max(1, min(50, int(value)))
+        return max(1, min(50, int(self._get("captcha", "personal_max_resident_tabs", 5) or 5)))
+
+    @property
+    def personal_idle_tab_ttl_seconds(self) -> int:
+        value = os.getenv("FCS_PERSONAL_IDLE_TAB_TTL_SECONDS")
+        if value:
+            return max(60, int(value))
+        return max(60, int(self._get("captcha", "personal_idle_tab_ttl_seconds", 600) or 600))
+
+    @property
+    def browser_personal_recreate_threshold(self) -> int:
+        value = os.getenv("FCS_BROWSER_PERSONAL_RECREATE_THRESHOLD")
+        if value:
+            try:
+                return max(1, min(20, int(value)))
+            except Exception:
+                return 2
+        try:
+            return max(1, min(20, int(self._get("captcha", "browser_personal_recreate_threshold", 2) or 2)))
+        except Exception:
+            return 2
+
+    @property
+    def browser_personal_restart_threshold(self) -> int:
+        value = os.getenv("FCS_BROWSER_PERSONAL_RESTART_THRESHOLD")
+        if value:
+            try:
+                return max(2, min(20, int(value)))
+            except Exception:
+                return 3
+        try:
+            return max(2, min(20, int(self._get("captcha", "browser_personal_restart_threshold", 3) or 3)))
+        except Exception:
+            return 3
 
     @property
     def flow_timeout(self) -> int:

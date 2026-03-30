@@ -418,6 +418,7 @@
           <div class="detail-row"><dt>运行角色</dt><dd id="detailRole">subnode</dd></div>
           <div class="detail-row"><dt>本地执行</dt><dd id="detailLocalSolve">--</dd></div>
           <div class="detail-row"><dt>活动会话</dt><dd id="detailActiveSessions">--</dd></div>
+          <div class="detail-row"><dt>当前池 token</dt><dd id="detailStandbyTokenCount">--</dd></div>
           <div class="detail-row"><dt>累计 solve</dt><dd id="detailSolveTotal">--</dd></div>
           <div class="detail-row"><dt>累计错误</dt><dd id="detailErrorTotal">--</dd></div>
         </dl>
@@ -509,6 +510,7 @@
         setText("detailRole", role);
         setText("detailLocalSolve", runtime.local_solve_enabled ? "已启用" : "未启用");
         setText("detailActiveSessions", toText(runtime.active_sessions));
+        setText("detailStandbyTokenCount", toText(browser.standby_token_count));
         setText("detailSolveTotal", toText(browser.total_solve_count));
         setText("detailErrorTotal", toText(browser.total_error_count));
 

@@ -565,9 +565,13 @@ class Database:
                 """
                 CREATE TABLE IF NOT EXISTS captcha_config (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
+                    captcha_method TEXT DEFAULT 'browser',
                     browser_proxy_enabled BOOLEAN DEFAULT 0,
                     browser_proxy_url TEXT,
                     browser_count INTEGER DEFAULT 1,
+                    personal_project_pool_size INTEGER DEFAULT 4,
+                    personal_max_resident_tabs INTEGER DEFAULT 5,
+                    personal_idle_tab_ttl_seconds INTEGER DEFAULT 600,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -758,6 +762,7 @@ class Database:
                     active_sessions INTEGER DEFAULT 0,
                     cached_sessions INTEGER DEFAULT 0,
                     max_concurrency INTEGER DEFAULT 1,
+                    standby_token_count INTEGER DEFAULT 0,
                     weight INTEGER DEFAULT 100,
                     last_heartbeat_at TIMESTAMP,
                     last_error TEXT,
@@ -770,6 +775,10 @@ class Database:
             # 历史版本把 node_name 设为 UNIQUE，会导致同名子节点覆盖；这里统一迁移为非唯一。
             await self._migrate_cluster_nodes_schema(db)
             await self._ensure_cluster_nodes_columns(db)
+            await self._add_column_if_missing(db, "captcha_config", "captcha_method", "TEXT DEFAULT 'browser'")
+            await self._add_column_if_missing(db, "captcha_config", "personal_project_pool_size", "INTEGER DEFAULT 4")
+            await self._add_column_if_missing(db, "captcha_config", "personal_max_resident_tabs", "INTEGER DEFAULT 5")
+            await self._add_column_if_missing(db, "captcha_config", "personal_idle_tab_ttl_seconds", "INTEGER DEFAULT 600")
             await self._add_column_if_missing(db, "captcha_jobs", "portal_user_id", "INTEGER")
             await self._add_column_if_missing(db, "captcha_jobs", "portal_api_key_id", "INTEGER")
             await self._repair_captcha_jobs_owner_references(db)
@@ -861,6 +870,7 @@ class Database:
                 active_sessions INTEGER DEFAULT 0,
                 cached_sessions INTEGER DEFAULT 0,
                 max_concurrency INTEGER DEFAULT 1,
+                standby_token_count INTEGER DEFAULT 0,
                 reported_browser_count INTEGER DEFAULT 1,
                 reported_node_max_concurrency INTEGER DEFAULT 1,
                 weight INTEGER DEFAULT 100,
@@ -875,13 +885,13 @@ class Database:
             """
             INSERT INTO cluster_nodes_v2 (
                 id, node_name, base_url, node_api_key, enabled, healthy,
-                active_sessions, cached_sessions, max_concurrency,
+                active_sessions, cached_sessions, max_concurrency, standby_token_count,
                 reported_browser_count, reported_node_max_concurrency, weight,
                 last_heartbeat_at, last_error, created_at, updated_at
             )
             SELECT
                 id, node_name, base_url, node_api_key, enabled, healthy,
-                active_sessions, cached_sessions, max_concurrency,
+                active_sessions, cached_sessions, max_concurrency, 0,
                 max_concurrency, max_concurrency, weight,
                 last_heartbeat_at, last_error, created_at, updated_at
             FROM cluster_nodes
@@ -892,6 +902,7 @@ class Database:
         await db.execute("ALTER TABLE cluster_nodes_v2 RENAME TO cluster_nodes")
 
     async def _ensure_cluster_nodes_columns(self, db: aiosqlite.Connection):
+        await self._add_column_if_missing(db, "cluster_nodes", "standby_token_count", "INTEGER DEFAULT 0")
         await self._add_column_if_missing(db, "cluster_nodes", "reported_browser_count", "INTEGER DEFAULT 1")
         await self._add_column_if_missing(db, "cluster_nodes", "reported_node_max_concurrency", "INTEGER DEFAULT 1")
 
@@ -1009,10 +1020,27 @@ class Database:
             if not row:
                 await db.execute(
                     """
-                    INSERT INTO captcha_config (id, browser_proxy_enabled, browser_proxy_url, browser_count)
-                    VALUES (1, ?, ?, ?)
+                    INSERT INTO captcha_config (
+                        id,
+                        captcha_method,
+                        browser_proxy_enabled,
+                        browser_proxy_url,
+                        browser_count,
+                        personal_project_pool_size,
+                        personal_max_resident_tabs,
+                        personal_idle_tab_ttl_seconds
+                    )
+                    VALUES (1, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    (1 if config.browser_proxy_enabled else 0, config.browser_proxy_url or None, config.browser_count),
+                    (
+                        config.captcha_method,
+                        1 if config.browser_proxy_enabled else 0,
+                        config.browser_proxy_url or None,
+                        config.browser_count,
+                        config.personal_project_pool_size,
+                        config.personal_max_resident_tabs,
+                        config.personal_idle_tab_ttl_seconds,
+                    ),
                 )
 
             cursor = await db.execute("SELECT id FROM service_admin WHERE id = 1")
@@ -2811,30 +2839,50 @@ class Database:
                 return CaptchaConfig()
             return CaptchaConfig(
                 id=row["id"],
+                captcha_method=str(row["captcha_method"] or "browser").strip().lower() or "browser",
                 browser_proxy_enabled=bool(row["browser_proxy_enabled"]),
                 browser_proxy_url=row["browser_proxy_url"],
                 browser_count=max(1, int(row["browser_count"] or 1)),
+                personal_project_pool_size=max(1, min(50, int(row["personal_project_pool_size"] or 4))),
+                personal_max_resident_tabs=max(1, min(50, int(row["personal_max_resident_tabs"] or 5))),
+                personal_idle_tab_ttl_seconds=max(60, int(row["personal_idle_tab_ttl_seconds"] or 600)),
                 created_at=row["created_at"],
                 updated_at=row["updated_at"],
             )
 
     async def update_captcha_config(
         self,
+        captcha_method: str,
         browser_proxy_enabled: bool,
         browser_proxy_url: Optional[str],
         browser_count: int,
+        personal_project_pool_size: int,
+        personal_max_resident_tabs: int,
+        personal_idle_tab_ttl_seconds: int,
     ):
         async with self._connect() as db:
             await db.execute(
                 """
                 UPDATE captcha_config
-                SET browser_proxy_enabled = ?,
+                SET captcha_method = ?,
+                    browser_proxy_enabled = ?,
                     browser_proxy_url = ?,
                     browser_count = ?,
+                    personal_project_pool_size = ?,
+                    personal_max_resident_tabs = ?,
+                    personal_idle_tab_ttl_seconds = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE id = 1
                 """,
-                (1 if browser_proxy_enabled else 0, browser_proxy_url, max(1, int(browser_count))),
+                (
+                    str(captcha_method or "browser").strip().lower() or "browser",
+                    1 if browser_proxy_enabled else 0,
+                    browser_proxy_url,
+                    max(1, int(browser_count)),
+                    max(1, min(50, int(personal_project_pool_size))),
+                    max(1, min(50, int(personal_max_resident_tabs))),
+                    max(60, int(personal_idle_tab_ttl_seconds)),
+                ),
             )
             await db.commit()
 
@@ -3831,7 +3879,8 @@ class Database:
         reported_node_max_concurrency: int,
         active_sessions: int,
         cached_sessions: int,
-        healthy: bool,
+        standby_token_count: int = 0,
+        healthy: bool = True,
     ) -> Dict[str, Any]:
         normalized_name = node_name.strip()
         normalized_url = base_url.strip().rstrip("/")
@@ -3851,7 +3900,7 @@ class Database:
                     UPDATE cluster_nodes
                     SET node_name = ?, node_api_key = ?, weight = ?, max_concurrency = ?,
                         reported_browser_count = ?, reported_node_max_concurrency = ?,
-                        active_sessions = ?, cached_sessions = ?, healthy = ?,
+                        active_sessions = ?, cached_sessions = ?, standby_token_count = ?, healthy = ?,
                         last_error = NULL,
                         last_heartbeat_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
@@ -3865,6 +3914,7 @@ class Database:
                         max(1, int(reported_node_max_concurrency)),
                         max(0, int(active_sessions)),
                         max(0, int(cached_sessions)),
+                        max(0, int(standby_token_count)),
                         1 if healthy else 0,
                         node_id,
                     ),
@@ -3874,11 +3924,11 @@ class Database:
                     """
                     INSERT INTO cluster_nodes (
                         node_name, base_url, node_api_key, enabled, healthy,
-                        active_sessions, cached_sessions, max_concurrency,
+                        active_sessions, cached_sessions, max_concurrency, standby_token_count,
                         reported_browser_count, reported_node_max_concurrency, weight,
                         last_heartbeat_at
                     )
-                    VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                    VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
                     """,
                     (
                         normalized_name,
@@ -3888,6 +3938,7 @@ class Database:
                         max(0, int(active_sessions)),
                         max(0, int(cached_sessions)),
                         max(1, int(max_concurrency)),
+                        max(0, int(standby_token_count)),
                         max(1, int(reported_browser_count)),
                         max(1, int(reported_node_max_concurrency)),
                         max(1, int(weight)),
@@ -3915,7 +3966,8 @@ class Database:
         reported_node_max_concurrency: int,
         active_sessions: int,
         cached_sessions: int,
-        healthy: bool,
+        standby_token_count: int = 0,
+        healthy: bool = True,
     ) -> Optional[Dict[str, Any]]:
         normalized_name = node_name.strip()
         normalized_url = base_url.strip().rstrip("/")
@@ -3939,6 +3991,7 @@ class Database:
                     reported_node_max_concurrency = ?,
                     active_sessions = ?,
                     cached_sessions = ?,
+                    standby_token_count = ?,
                     healthy = ?,
                     last_error = NULL,
                     last_heartbeat_at = CURRENT_TIMESTAMP,
@@ -3952,6 +4005,7 @@ class Database:
                     max(1, int(reported_node_max_concurrency)),
                     max(0, int(active_sessions)),
                     max(0, int(cached_sessions)),
+                    max(0, int(standby_token_count)),
                     1 if healthy else 0,
                     node_id,
                 ),
@@ -3970,7 +4024,7 @@ class Database:
             cursor = await db.execute(
                 """
                 SELECT id, node_name, base_url, enabled, healthy,
-                       active_sessions, cached_sessions, max_concurrency,
+                       active_sessions, cached_sessions, max_concurrency, standby_token_count,
                        reported_browser_count, reported_node_max_concurrency, weight,
                        last_heartbeat_at, last_error, created_at, updated_at
                 FROM cluster_nodes
